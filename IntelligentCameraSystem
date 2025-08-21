@@ -1,0 +1,1972 @@
+----------------------------------------
+-- ROBLOX INTELLIGENT CAMERA SYSTEM 
+----------------------------------------
+
+----------------------------------------
+-- SERVICES
+----------------------------------------
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
+local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+local CollectionService = game:GetService("CollectionService")
+local TweenService = game:GetService("TweenService")
+
+----------------------------------------
+-- PLAYER / CAMERA
+----------------------------------------
+local player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+local char = player.Character or player.CharacterAdded:Wait()
+local root = char:WaitForChild("HumanoidRootPart")
+local humanoid = char:WaitForChild("Humanoid")
+local playerGui = player:WaitForChild("PlayerGui")
+
+----------------------------------------
+-- PLATFORM DETECTION - PC ONLY WITH AUTO FALLBACK
+----------------------------------------
+-- Detect if on mobile/tablet/VR - if so, use standard Roblox camera
+local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+local isVR = UserInputService.VREnabled
+
+-- If on mobile or VR, don't run custom camera system at all
+if isMobile or isVR then
+	-- Set walking speed for mobile/VR users
+	spawn(function()
+		local character = player.Character or player.CharacterAdded:Wait()
+		local hum = character:WaitForChild("Humanoid")
+		hum.WalkSpeed = 20
+	end)
+	-- Exit the script completely - let Roblox handle camera normally
+	return
+end
+
+--==============================================================================
+-- CAMERA COLLISION - IMPROVED WITH SELECTIVE FILTERING
+--==============================================================================
+local raycastParams = RaycastParams.new()
+raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+raycastParams.FilterDescendantsInstances = {char}
+raycastParams.IgnoreWater = true
+
+-- Function to check if object should be ignored for collision
+local function shouldIgnoreForCollision(instance)
+	if not instance then return false end
+
+	-- List of object names to ignore (collectibles, mannequins, etc.)
+	local ignoredNames = {
+		"Coin", "Pickup", "Collectible", "PowerUp", "Token",
+		"Mannequin", "Maniquien", "DisplayModel", "ClothingStand",
+		"WearableDisplay", "TryOn", "OutfitDisplay", "Gem", "Crystal",
+		"Orb", "Star", "Heart", "Diamond", "Gold", "Silver", "Bronze",
+		"Treasure", "Reward", "Prize", "Bonus", "Item"
+	}
+
+	-- Check exact name match or partial match
+	local instanceNameLower = instance.Name:lower()
+	for _, ignoredName in ipairs(ignoredNames) do
+		if instanceNameLower:find(ignoredName:lower()) then
+			return true
+		end
+	end
+
+	-- Ignore objects tagged with "IgnoreCameraCollision" or "Collectible"
+	if CollectionService:HasTag(instance, "IgnoreCameraCollision") or 
+		CollectionService:HasTag(instance, "Collectible") then
+		return true
+	end
+
+	return false
+end
+
+-- Get all players for cinematic mode
+local function getPlayersInOrder()
+	local playerList = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+			table.insert(playerList, p)
+		end
+	end
+	-- Sort by leaderboard stats if available, otherwise by name
+	table.sort(playerList, function(a, b)
+		local aStats = a:FindFirstChild("leaderstats")
+		local bStats = b:FindFirstChild("leaderstats")
+		if aStats and bStats then
+			local aValue = aStats:FindFirstChildOfClass("IntValue") or aStats:FindFirstChildOfClass("NumberValue")
+			local bValue = bStats:FindFirstChildOfClass("IntValue") or bStats:FindFirstChildOfClass("NumberValue")
+			if aValue and bValue then
+				return aValue.Value > bValue.Value
+			end
+		end
+		return a.Name < b.Name
+	end)
+	return playerList
+end
+
+-- Orbital camera collision prevention
+local function getOrbitalCollisionCFrame(targetPos, lookAtPos, filterList)
+	local direction = targetPos - lookAtPos
+	local distance = direction.Magnitude
+
+	if distance < 0.1 then return CFrame.new(targetPos, lookAtPos) end
+
+	local tempParams = RaycastParams.new()
+	tempParams.FilterType = Enum.RaycastFilterType.Exclude
+	tempParams.FilterDescendantsInstances = filterList or {char}
+	tempParams.IgnoreWater = true
+
+	local result = Workspace:Raycast(lookAtPos, direction, tempParams)
+
+	local finalPos = targetPos
+	if result then
+		if not shouldIgnoreForCollision(result.Instance) then
+			finalPos = result.Position - direction.Unit * 1.5
+		end
+	end
+
+	return CFrame.new(finalPos, lookAtPos)
+end
+
+-- Get stable face position using fixed offset (no shake)
+local function getStableFacePosition(character)
+	character = character or char
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if rootPart then
+		-- Use fixed offset from root for face level
+		return rootPart.Position + Vector3.new(0, 1.5, 0)
+	end
+	return Vector3.new(0, 0, 0)
+end
+
+-- Get avatar height
+local function getAvatarHeight(character)
+	character = character or char
+	local head = character:FindFirstChild("Head")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if head and rootPart then
+		return (head.Position - rootPart.Position).Y
+	else
+		local hum = character:FindFirstChild("Humanoid")
+		if hum and hum.RigType == Enum.HumanoidRigType.R6 then
+			return 2
+		else
+			return 2.5
+		end
+	end
+end
+
+----------------------------------------
+-- CONFIG
+----------------------------------------
+local CFG = {
+	MODE1 = {
+		name = "AERIAL",
+		walk = 20,
+		zoom = {min = 1.5, max = 150, def = 10},
+		smooth = 0.25,
+		wheelSens = 10,
+		verticalAngle = 0,
+		verticalAngleLimits = {min = -85, max = 85},
+		FloatIntensity = 0,
+		FloatSpeed = 0,
+		RotationIntensity = 0,
+		collisionSmoothFactor = 0.3,
+		collisionBufferDistance = 1.0,
+		runningStabilization = 0.95,
+		headSmoothFactor = 0.35,  -- Original value for stability
+		returnSmoothFactor = 0.5,
+		runningZoomOut = 1.0,
+		runwayWalkSpeed = 5,  -- Speed for runway walk
+	},
+	MODE2 = {
+		name = "HANDHELD",
+		speed = 30,  -- Default normal flight speed
+		maxSpeed = 80,  -- Maximum flight speed (when slider at max)
+		minSpeed = 1,  -- Minimum flight speed (when slider at min)
+		runSpeed = 20,  -- Default run speed
+		maxRunSpeed = 80,  -- Maximum run speed
+		minRunSpeed = 1,  -- Minimum run speed
+		smooth = 0.15,
+		FloatIntensity = 1,
+		FloatSpeed = 1,
+		RotationIntensity = 0,
+		BounceForce = 1,
+		BounceDamping = 2,
+		CollisionSphereRadius = 1.5,
+		verticalAngleLimits = {min = -89, max = 89},
+		zoomLevel = 1.0,
+		zoomMin = 0.425,
+		zoomMax = 6.5,
+		zoomSpeed = 0.16,
+		zoomDamping = 0.30,
+		zoomSensitivity = 0.1,
+		baseFOV = 70,
+		rollSpeed = 30,
+		rollDamping = 0.30,
+		runWalkSpeed = 20,
+		runwayWalkSpeed = 5,  -- Speed for runway walk
+		runwaySpeed = 6,  -- Camera speed during runway walk
+	},
+	MODE3 = {
+		name = "CINEMATIC",
+		states = 10,
+		switch = 16,
+		smooth = 0.02,
+		FloatIntensity = 0.1,
+		FloatSpeed = 0.25,
+		RotationIntensity = 0.05,
+		playerSwitchDuration = 2.0,
+		runwayWalkSpeed = 5,  -- Speed for runway walk
+	},
+	AFK = {
+		timeout = 180
+	}
+}
+
+--==============================================================================
+-- CINEMATIC SHOTS TABLE - ADJUSTED TO KEEP AVATAR IN FRAME
+--==============================================================================
+local SHOTS = {
+	{d = 10, h = 0, v = 10, off = Vector3.new(0, 1, 0), fov = 50},      -- Level shot
+	{d = 15, h = 60, v = 15, off = Vector3.new(4, 2, 0), fov = 60},     -- Side angle
+	{d = 30, h = 0, v = 35, off = Vector3.new(0, 8, 0), fov = 70},      -- High overview
+	{d = 10, h = -30, v = 10, off = Vector3.new(0, 0, 0), fov = 45},    -- Low angle
+	{d = 12, h = -90, v = 5, off = Vector3.new(-5, 1, 0), fov = 55},    -- Profile
+	{d = 15, h = 180, v = 8, off = Vector3.new(0, 2, 0), fov = 65},     -- Behind
+	{d = 4, h = 15, v = 5, off = Vector3.new(1, 1, 0), fov = 35},       -- Close-up
+	{d = 40, h = 20, v = 40, off = Vector3.new(0, 10, 0), fov = 75},    -- Wide shot
+	{d = 18, h = 135, v = 20, off = Vector3.new(0, 3, 0), fov = 60},    -- Three-quarter
+	{d = 20, h = 90, v = 0, off = Vector3.new(0, 0.5, 0), fov = 50}     -- Side view
+}
+
+----------------------------------------
+-- STATE
+----------------------------------------
+local STATE = {
+	mode = 1,
+	zoom = CFG.MODE1.zoom.def,
+	angX = 0,
+	angY = 180,
+	freePos = camera.CFrame.Position,
+	freeYaw = 0,
+	freePitch = 0,
+	keys = {},
+	camIdx = 1,
+	lastT = 0,
+	bounceVelocity = Vector3.new(0, 0, 0),
+	lastMoveDir = Vector3.new(0, 0, 0),
+	currentZoom = 1.0,
+	targetZoom = 1.0,
+	actualZoom = 1.0,
+	zoomVelocity = 0,
+	uiHidden = false,
+	cameraRoll = 0,
+	rollVelocity = 0,
+	-- AFK tracking
+	lastActivity = tick(),
+	wasAFK = false,
+	previousMode = 1,
+	-- Cinematic player tracking
+	cinematicTarget = player,
+	cinematicTargetIndex = 1,
+	playerSwitchTime = 0,
+	playerSwitching = false,
+	playerSwitchFrom = nil,
+	playerSwitchTo = nil,
+	-- Collision smoothing states
+	lastValidCameraPosition = nil,
+	collisionSmoothing = 0,
+	previousCollisionDistance = math.huge,
+	-- Running state for Mode 2
+	isRunning = false,
+	-- Avatar movement detection
+	isAvatarMoving = false,
+	avatarVelocity = Vector3.new(0, 0, 0),
+	-- Smoothed head position for stable camera
+	smoothedFacePosition = nil,  -- Initialize as nil like original
+	-- Sensitivity settings (percentage based 0.1 to 1.0)
+	sensitivityMode1 = 1.0,  -- 100% default
+	sensitivityMode2 = 1.0,  -- 100% default
+	-- Flight speed setting for Mode 2 (percentage based 0.1 to 1.0)
+	flightSpeedMode2 = 1.0,  -- 100% default (max speed)
+	-- Smooth zoom transition for running
+	currentRunningZoom = 1.0,
+	targetRunningZoom = 1.0,
+	-- New UI states
+	cameraUIVisible = false,  -- Start with camera UI hidden
+	cameraIconOnly = true,    -- Show icon at start
+}
+
+-- Sensitivities
+local SENS = {
+	MODE1 = 0.20,
+	MODE2 = 0.20
+}
+
+-- Mouse button states
+local isLMB = false
+local isRMB = false
+local isRunwayWalk = false  -- For Shift runway walk
+
+-- UI Elements
+local controlHintsGui = nil
+local mode1Card = nil
+local mode2Card = nil
+local mode3Card = nil
+local cameraIconButton = nil
+
+----------------------------------------
+-- UTILS
+----------------------------------------
+local function lerp(a, b, t)
+	if type(a) == "number" then
+		return a + (b - a) * t
+	else
+		return a:Lerp(b, t)
+	end
+end
+local clamp = function(n, min, max) return math.clamp(n, min, max) end
+local rad = math.rad
+local deg = math.deg
+
+----------------------------------------
+-- CREATE CAMERA ICON BUTTON
+----------------------------------------
+local function createCameraIconButton()
+	local iconGui = Instance.new("ScreenGui")
+	iconGui.Name = "CameraIconGUI"
+	iconGui.ResetOnSpawn = false
+	iconGui.IgnoreGuiInset = true
+	iconGui.Parent = playerGui
+
+	-- Container frame with background (matching other UI cards)
+	local container = Instance.new("Frame")
+	container.Name = "CameraIconContainer"
+	container.Size = UDim2.new(0, 140, 0, 40)
+	container.Position = UDim2.new(1, -150, 1, -60)
+	container.BackgroundColor3 = Color3.new(0.15, 0.15, 0.15)
+	container.BackgroundTransparency = 0.3
+	container.BorderSizePixel = 0
+	container.Parent = iconGui
+
+	local containerCorner = Instance.new("UICorner")
+	containerCorner.CornerRadius = UDim.new(0, 8)
+	containerCorner.Parent = container
+
+	-- C key frame (like other UI elements)
+	local cKeyFrame = Instance.new("Frame")
+	cKeyFrame.Size = UDim2.new(0, 30, 0, 22)
+	cKeyFrame.Position = UDim2.new(0, 10, 0.5, -11)
+	cKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	cKeyFrame.BorderSizePixel = 0
+	cKeyFrame.Parent = container
+
+	local cKeyCorner = Instance.new("UICorner")
+	cKeyCorner.CornerRadius = UDim.new(0, 6)
+	cKeyCorner.Parent = cKeyFrame
+
+	local cKeyLabel = Instance.new("TextLabel")
+	cKeyLabel.Text = "C"
+	cKeyLabel.Font = Enum.Font.SourceSansBold
+	cKeyLabel.TextSize = 16
+	cKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	cKeyLabel.BackgroundTransparency = 1
+	cKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	cKeyLabel.Parent = cKeyFrame
+
+	-- Text label "Camera UI" (matching other UI text style)
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Name = "CameraUIText"
+	textLabel.Size = UDim2.new(0, 85, 1, 0)
+	textLabel.Position = UDim2.new(0, 50, 0, 0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.Text = "Camera UI"
+	textLabel.Font = Enum.Font.SourceSansBold
+	textLabel.TextSize = 16
+	textLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	textLabel.TextXAlignment = Enum.TextXAlignment.Left
+	textLabel.Parent = container
+
+	-- Click handler for entire container
+	local clickButton = Instance.new("TextButton")
+	clickButton.Size = UDim2.new(1, 0, 1, 0)
+	clickButton.BackgroundTransparency = 1
+	clickButton.Text = ""
+	clickButton.Parent = container
+
+	clickButton.MouseButton1Click:Connect(function()
+		STATE.cameraIconOnly = false
+		STATE.cameraUIVisible = true
+		updateUIVisibility()
+	end)
+
+	return container  -- Return container instead of iconButton
+end
+
+----------------------------------------
+-- CREATE DESKTOP UI CARDS
+----------------------------------------
+-- Create sensitivity slider component
+local function createSlider(parent, labelText, currentValue, onValueChanged)
+	local sliderFrame = Instance.new("Frame")
+	sliderFrame.Name = labelText .. "Slider"
+	sliderFrame.Size = UDim2.new(1, 0, 0, 50)
+	sliderFrame.BackgroundTransparency = 1
+	sliderFrame.Parent = parent
+
+	-- Label
+	local label = Instance.new("TextLabel")
+	label.Text = labelText
+	label.Font = Enum.Font.SourceSansBold
+	label.TextSize = 14
+	label.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	label.BackgroundTransparency = 1
+	label.Size = UDim2.new(1, 0, 0, 20)
+	label.Position = UDim2.new(0, 0, 0, 0)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Parent = sliderFrame
+
+	-- Slider container
+	local sliderContainer = Instance.new("Frame")
+	sliderContainer.Size = UDim2.new(1, 0, 0, 22)
+	sliderContainer.Position = UDim2.new(0, 0, 0, 22)
+	sliderContainer.BackgroundTransparency = 1
+	sliderContainer.Parent = sliderFrame
+
+	-- Min label
+	local minLabel = Instance.new("TextLabel")
+	minLabel.Text = "Min"
+	minLabel.Font = Enum.Font.SourceSans
+	minLabel.TextSize = 10
+	minLabel.TextColor3 = Color3.new(0.6, 0.6, 0.6)
+	minLabel.BackgroundTransparency = 1
+	minLabel.Size = UDim2.new(0, 25, 1, 0)
+	minLabel.Position = UDim2.new(0, 0, 0, 0)
+	minLabel.TextXAlignment = Enum.TextXAlignment.Left
+	minLabel.Parent = sliderContainer
+
+	-- Max label
+	local maxLabel = Instance.new("TextLabel")
+	maxLabel.Text = "Max"
+	maxLabel.Font = Enum.Font.SourceSans
+	maxLabel.TextSize = 10
+	maxLabel.TextColor3 = Color3.new(0.6, 0.6, 0.6)
+	maxLabel.BackgroundTransparency = 1
+	maxLabel.Size = UDim2.new(0, 25, 1, 0)
+	maxLabel.Position = UDim2.new(1, -25, 0, 0)
+	maxLabel.TextXAlignment = Enum.TextXAlignment.Right
+	maxLabel.Parent = sliderContainer
+
+	-- Slider track
+	local sliderTrack = Instance.new("Frame")
+	sliderTrack.Size = UDim2.new(1, -60, 0, 4)
+	sliderTrack.Position = UDim2.new(0, 30, 0.5, -2)
+	sliderTrack.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+	sliderTrack.BorderSizePixel = 0
+	sliderTrack.Parent = sliderContainer
+
+	local trackCorner = Instance.new("UICorner")
+	trackCorner.CornerRadius = UDim.new(0, 2)
+	trackCorner.Parent = sliderTrack
+
+	-- Slider fill (shows current value)
+	local sliderFill = Instance.new("Frame")
+	sliderFill.Size = UDim2.new(currentValue, 0, 1, 0)
+	sliderFill.Position = UDim2.new(0, 0, 0, 0)
+	sliderFill.BackgroundColor3 = Color3.new(0.4, 0.6, 0.4)
+	sliderFill.BorderSizePixel = 0
+	sliderFill.Parent = sliderTrack
+
+	local fillCorner = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(0, 2)
+	fillCorner.Parent = sliderFill
+
+	-- Slider handle
+	local sliderHandle = Instance.new("TextButton")
+	sliderHandle.Size = UDim2.new(0, 16, 0, 16)
+	sliderHandle.Position = UDim2.new(currentValue, -8, 0.5, -8)
+	sliderHandle.BackgroundColor3 = Color3.new(0.9, 0.9, 0.9)
+	sliderHandle.BorderSizePixel = 0
+	sliderHandle.Text = ""
+	sliderHandle.Parent = sliderTrack
+
+	local handleCorner = Instance.new("UICorner")
+	handleCorner.CornerRadius = UDim.new(0.5, 0)
+	handleCorner.Parent = sliderHandle
+
+	-- Percentage tooltip
+	local tooltip = Instance.new("TextLabel")
+	tooltip.Size = UDim2.new(0, 40, 0, 20)
+	tooltip.Position = UDim2.new(0.5, -20, -1, -5)
+	tooltip.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)
+	tooltip.BorderSizePixel = 0
+	tooltip.Text = math.floor(currentValue * 100) .. "%"
+	tooltip.Font = Enum.Font.SourceSans
+	tooltip.TextSize = 11
+	tooltip.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	tooltip.Visible = false
+	tooltip.Parent = sliderHandle
+
+	local tooltipCorner = Instance.new("UICorner")
+	tooltipCorner.CornerRadius = UDim.new(0, 4)
+	tooltipCorner.Parent = tooltip
+
+	-- Slider interaction
+	local dragging = false
+
+	local function updateSlider(input)
+		local trackPos = sliderTrack.AbsolutePosition.X
+		local trackSize = sliderTrack.AbsoluteSize.X
+		local mouseX = input.Position.X
+
+		local value = math.clamp((mouseX - trackPos) / trackSize, 0, 1)
+		-- Round to nearest 10%
+		value = math.floor(value * 10 + 0.5) / 10
+		-- Ensure minimum 10%
+		value = math.max(0.1, value)
+
+		sliderHandle.Position = UDim2.new(value, -8, 0.5, -8)
+		sliderFill.Size = UDim2.new(value, 0, 1, 0)
+		tooltip.Text = math.floor(value * 100) .. "%"
+
+		if onValueChanged then
+			onValueChanged(value)
+		end
+	end
+
+	sliderHandle.MouseButton1Down:Connect(function()
+		dragging = true
+		tooltip.Visible = true
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+			tooltip.Visible = false
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			updateSlider(input)
+		end
+	end)
+
+	return sliderFrame
+end
+
+local function createMode1Card()
+	local card = Instance.new("Frame")
+	card.Name = "Mode1Card"
+	card.Size = UDim2.new(0, 260, 0, 240)  -- Increased height for runway walk
+	card.Position = UDim2.new(1, -280, 1, -260)
+	card.BackgroundColor3 = Color3.new(0.15, 0.15, 0.15)
+	card.BackgroundTransparency = 0.3
+	card.BorderSizePixel = 0
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 12)
+	corner.Parent = card
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, 15)
+	padding.PaddingBottom = UDim.new(0, 15)
+	padding.PaddingLeft = UDim.new(0, 20)
+	padding.PaddingRight = UDim.new(0, 20)
+	padding.Parent = card
+
+	-- Title
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Text = "CAMERA CONTROLS"
+	title.Font = Enum.Font.SourceSansBold
+	title.TextSize = 16
+	title.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, 0, 0, 20)
+	title.Position = UDim2.new(0, 0, 0, 0)
+	title.Parent = card
+
+	-- X - Exit (Hide to Icon)
+	local xFrame = Instance.new("Frame")
+	xFrame.Size = UDim2.new(1, 0, 0, 25)
+	xFrame.Position = UDim2.new(0, 0, 0, 30)
+	xFrame.BackgroundTransparency = 1
+	xFrame.Parent = card
+
+	local xKeyFrame = Instance.new("Frame")
+	xKeyFrame.Size = UDim2.new(0, 100, 0, 22)  -- Made wider for consistency
+	xKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	xKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	xKeyFrame.BorderSizePixel = 0
+	xKeyFrame.Parent = xFrame
+
+	local xKeyCorner = Instance.new("UICorner")
+	xKeyCorner.CornerRadius = UDim.new(0, 6)
+	xKeyCorner.Parent = xKeyFrame
+
+	local xKeyLabel = Instance.new("TextLabel")
+	xKeyLabel.Text = "X"
+	xKeyLabel.Font = Enum.Font.SourceSansBold
+	xKeyLabel.TextSize = 16
+	xKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	xKeyLabel.BackgroundTransparency = 1
+	xKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	xKeyLabel.Parent = xKeyFrame
+
+	local xLabel = Instance.new("TextLabel")
+	xLabel.Text = "Exit (Hide to Icon)"
+	xLabel.Font = Enum.Font.SourceSansBold
+	xLabel.TextSize = 16
+	xLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	xLabel.BackgroundTransparency = 1
+	xLabel.Size = UDim2.new(0, 140, 1, 0)
+	xLabel.Position = UDim2.new(0, 110, 0, 0)
+	xLabel.TextXAlignment = Enum.TextXAlignment.Left
+	xLabel.Parent = xFrame
+
+	-- U - Hide UI
+	local uFrame = Instance.new("Frame")
+	uFrame.Size = UDim2.new(1, 0, 0, 25)
+	uFrame.Position = UDim2.new(0, 0, 0, 60)
+	uFrame.BackgroundTransparency = 1
+	uFrame.Parent = card
+
+	local uKeyFrame = Instance.new("Frame")
+	uKeyFrame.Size = UDim2.new(0, 100, 0, 22)  -- Made wider for consistency
+	uKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	uKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	uKeyFrame.BorderSizePixel = 0
+	uKeyFrame.Parent = uFrame
+
+	local uKeyCorner = Instance.new("UICorner")
+	uKeyCorner.CornerRadius = UDim.new(0, 6)
+	uKeyCorner.Parent = uKeyFrame
+
+	local uKeyLabel = Instance.new("TextLabel")
+	uKeyLabel.Text = "U"
+	uKeyLabel.Font = Enum.Font.SourceSansBold
+	uKeyLabel.TextSize = 16
+	uKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	uKeyLabel.BackgroundTransparency = 1
+	uKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	uKeyLabel.Parent = uKeyFrame
+
+	local uLabel = Instance.new("TextLabel")
+	uLabel.Text = "Hide UI"
+	uLabel.Font = Enum.Font.SourceSansBold
+	uLabel.TextSize = 16
+	uLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	uLabel.BackgroundTransparency = 1
+	uLabel.Size = UDim2.new(0, 140, 1, 0)
+	uLabel.Position = UDim2.new(0, 110, 0, 0)
+	uLabel.TextXAlignment = Enum.TextXAlignment.Left
+	uLabel.Parent = uFrame
+
+	-- C - Free Camera
+	local cFrame = Instance.new("Frame")
+	cFrame.Size = UDim2.new(1, 0, 0, 25)
+	cFrame.Position = UDim2.new(0, 0, 0, 90)
+	cFrame.BackgroundTransparency = 1
+	cFrame.Parent = card
+
+	local cKeyFrame = Instance.new("Frame")
+	cKeyFrame.Size = UDim2.new(0, 100, 0, 22)  -- Made wider for consistency
+	cKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	cKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	cKeyFrame.BorderSizePixel = 0
+	cKeyFrame.Parent = cFrame
+
+	local cKeyCorner = Instance.new("UICorner")
+	cKeyCorner.CornerRadius = UDim.new(0, 6)
+	cKeyCorner.Parent = cKeyFrame
+
+	local cKeyLabel = Instance.new("TextLabel")
+	cKeyLabel.Text = "C"
+	cKeyLabel.Font = Enum.Font.SourceSansBold
+	cKeyLabel.TextSize = 16
+	cKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	cKeyLabel.BackgroundTransparency = 1
+	cKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	cKeyLabel.Parent = cKeyFrame
+
+	local cLabel = Instance.new("TextLabel")
+	cLabel.Text = "Free Camera"
+	cLabel.Font = Enum.Font.SourceSansBold
+	cLabel.TextSize = 16
+	cLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	cLabel.BackgroundTransparency = 1
+	cLabel.Size = UDim2.new(0, 140, 1, 0)
+	cLabel.Position = UDim2.new(0, 110, 0, 0)
+	cLabel.TextXAlignment = Enum.TextXAlignment.Left
+	cLabel.Parent = cFrame
+
+	-- Hold Shift - Runway Walk (FIXED TEXT & WIDTH)
+	local runwayFrame = Instance.new("Frame")
+	runwayFrame.Size = UDim2.new(1, 0, 0, 25)
+	runwayFrame.Position = UDim2.new(0, 0, 0, 120)
+	runwayFrame.BackgroundTransparency = 1
+	runwayFrame.Parent = card
+
+	local runwayKeyFrame = Instance.new("Frame")
+	runwayKeyFrame.Size = UDim2.new(0, 100, 0, 22)  -- Wider for longer text
+	runwayKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	runwayKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	runwayKeyFrame.BorderSizePixel = 0
+	runwayKeyFrame.Parent = runwayFrame
+
+	local runwayKeyCorner = Instance.new("UICorner")
+	runwayKeyCorner.CornerRadius = UDim.new(0, 6)
+	runwayKeyCorner.Parent = runwayKeyFrame
+
+	local runwayKeyLabel = Instance.new("TextLabel")
+	runwayKeyLabel.Text = "Hold Shift"  -- Updated text
+	runwayKeyLabel.Font = Enum.Font.SourceSansBold
+	runwayKeyLabel.TextSize = 16
+	runwayKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	runwayKeyLabel.BackgroundTransparency = 1
+	runwayKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	runwayKeyLabel.Parent = runwayKeyFrame
+
+	local runwayLabel = Instance.new("TextLabel")
+	runwayLabel.Text = "Runway Walk"
+	runwayLabel.Font = Enum.Font.SourceSansBold
+	runwayLabel.TextSize = 16
+	runwayLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	runwayLabel.BackgroundTransparency = 1
+	runwayLabel.Size = UDim2.new(0, 140, 1, 0)
+	runwayLabel.Position = UDim2.new(0, 110, 0, 0)
+	runwayLabel.TextXAlignment = Enum.TextXAlignment.Left
+	runwayLabel.Parent = runwayFrame
+
+	-- Sensitivity Slider
+	local sliderContainer = Instance.new("Frame")
+	sliderContainer.Size = UDim2.new(1, 0, 0, 50)
+	sliderContainer.Position = UDim2.new(0, 0, 0, 155)
+	sliderContainer.BackgroundTransparency = 1
+	sliderContainer.Parent = card
+
+	local slider = createSlider(sliderContainer, "Sensitivity", STATE.sensitivityMode1, function(value)
+		STATE.sensitivityMode1 = value
+	end)
+
+	return card
+end
+
+local function createMode2Card()
+	-- Create container for Mode 2
+	local container = Instance.new("Frame")
+	container.Name = "Mode2Card"
+	container.Size = UDim2.new(0, 320, 0, 410)  -- Increased for runway walk
+	container.Position = UDim2.new(1, -340, 1, -430)
+	container.BackgroundColor3 = Color3.new(0.15, 0.15, 0.15)
+	container.BackgroundTransparency = 0.3
+	container.BorderSizePixel = 0
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 12)
+	corner.Parent = container
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, 12)
+	padding.PaddingBottom = UDim.new(0, 12)
+	padding.PaddingLeft = UDim.new(0, 20)
+	padding.PaddingRight = UDim.new(0, 20)
+	padding.Parent = container
+
+	-- Title
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Text = "CAMERA CONTROLS"
+	title.Font = Enum.Font.SourceSansBold
+	title.TextSize = 16
+	title.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, 0, 0, 20)
+	title.Position = UDim2.new(0, 0, 0, 0)
+	title.Parent = container
+
+	-- X - Exit (at top)
+	local xFrame = Instance.new("Frame")
+	xFrame.Size = UDim2.new(1, 0, 0, 25)
+	xFrame.Position = UDim2.new(0, 0, 0, 30)
+	xFrame.BackgroundTransparency = 1
+	xFrame.Parent = container
+
+	local xKeyFrame = Instance.new("Frame")
+	xKeyFrame.Size = UDim2.new(0, 100, 0, 22)
+	xKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	xKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	xKeyFrame.BorderSizePixel = 0
+	xKeyFrame.Parent = xFrame
+
+	local xKeyCorner = Instance.new("UICorner")
+	xKeyCorner.CornerRadius = UDim.new(0, 6)
+	xKeyCorner.Parent = xKeyFrame
+
+	local xKeyLabel = Instance.new("TextLabel")
+	xKeyLabel.Text = "X"
+	xKeyLabel.Font = Enum.Font.SourceSansBold
+	xKeyLabel.TextSize = 16
+	xKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	xKeyLabel.BackgroundTransparency = 1
+	xKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	xKeyLabel.Parent = xKeyFrame
+
+	local xLabel = Instance.new("TextLabel")
+	xLabel.Text = "Exit"
+	xLabel.Font = Enum.Font.SourceSansBold
+	xLabel.TextSize = 16
+	xLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	xLabel.BackgroundTransparency = 1
+	xLabel.Size = UDim2.new(0, 170, 1, 0)
+	xLabel.Position = UDim2.new(0, 110, 0, 0)
+	xLabel.TextXAlignment = Enum.TextXAlignment.Left
+	xLabel.Parent = xFrame
+
+	-- Control hints data (updated)
+	local controls = {
+		{keys = "W A S D", desc = "Move Camera"},
+		{keys = "Hold T", desc = "Run & Control Camera"},
+		{keys = "R / F", desc = "Up / Down"},
+		{keys = "Q / E", desc = "Tilt Right / Left"},
+		{keys = "Wheel", desc = "Zoom In/Out"},
+		{keys = "C", desc = "Cinematic Mode"},
+		{keys = "Hold Shift", desc = "Runway Walk"}  -- UPDATED
+	}
+
+	-- Create control labels
+	for i, control in ipairs(controls) do
+		local frame = Instance.new("Frame")
+		frame.Name = "Control" .. i
+		frame.Size = UDim2.new(1, 0, 0, 25)
+		frame.Position = UDim2.new(0, 0, 0, 35 + (i * 26))
+		frame.BackgroundTransparency = 1
+		frame.Parent = container
+
+		local keysFrame = Instance.new("Frame")
+		keysFrame.Name = "KeysFrame"
+		keysFrame.Size = UDim2.new(0, 100, 0, 22)
+		keysFrame.Position = UDim2.new(0, 0, 0, 0)
+		keysFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+		keysFrame.BorderSizePixel = 0
+		keysFrame.Parent = frame
+
+		local keysCorner = Instance.new("UICorner")
+		keysCorner.CornerRadius = UDim.new(0, 6)
+		keysCorner.Parent = keysFrame
+
+		local keysLabel = Instance.new("TextLabel")
+		keysLabel.Name = "Keys"
+		keysLabel.Text = control.keys
+		keysLabel.Font = Enum.Font.SourceSansBold
+		keysLabel.TextSize = 16
+		keysLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+		keysLabel.BackgroundTransparency = 1
+		keysLabel.Size = UDim2.new(1, 0, 1, 0)
+		keysLabel.Parent = keysFrame
+
+		local descLabel = Instance.new("TextLabel")
+		descLabel.Name = "Description"
+		descLabel.Text = control.desc
+		descLabel.Font = Enum.Font.SourceSansBold
+		descLabel.TextSize = 16
+		descLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+		descLabel.BackgroundTransparency = 1
+		descLabel.Size = UDim2.new(0, 170, 1, 0)
+		descLabel.Position = UDim2.new(0, 110, 0, 0)
+		descLabel.TextXAlignment = Enum.TextXAlignment.Left
+		descLabel.Parent = frame
+	end
+
+	-- Sensitivity Slider for Mode 2
+	local sensitivityContainer = Instance.new("Frame")
+	sensitivityContainer.Size = UDim2.new(1, 0, 0, 50)
+	sensitivityContainer.Position = UDim2.new(0, 0, 0, 265)
+	sensitivityContainer.BackgroundTransparency = 1
+	sensitivityContainer.Parent = container
+
+	local sensitivitySlider = createSlider(sensitivityContainer, "Sensitivity", STATE.sensitivityMode2, function(value)
+		STATE.sensitivityMode2 = value
+	end)
+
+	-- FLIGHT SPEED SLIDER
+	local flightSpeedContainer = Instance.new("Frame")
+	flightSpeedContainer.Size = UDim2.new(1, 0, 0, 50)
+	flightSpeedContainer.Position = UDim2.new(0, 0, 0, 325)
+	flightSpeedContainer.BackgroundTransparency = 1
+	flightSpeedContainer.Parent = container
+
+	local flightSpeedSlider = createSlider(flightSpeedContainer, "Flight Speed", STATE.flightSpeedMode2, function(value)
+		STATE.flightSpeedMode2 = value
+		-- Update the current speeds based on the slider value
+		local cfg = CFG.MODE2
+		cfg.speed = cfg.minSpeed + (cfg.maxSpeed - cfg.minSpeed) * value
+		cfg.runSpeed = cfg.minRunSpeed + (cfg.maxRunSpeed - cfg.minRunSpeed) * value
+	end)
+
+	return container
+end
+
+local function createMode3Card()
+	local card = Instance.new("Frame")
+	card.Name = "Mode3Card"
+	card.Size = UDim2.new(0, 320, 0, 210)  -- Increased width from 260 to 320
+	card.Position = UDim2.new(1, -340, 1, -230)  -- Adjusted position for wider card
+	card.BackgroundColor3 = Color3.new(0.15, 0.15, 0.15)
+	card.BackgroundTransparency = 0.3
+	card.BorderSizePixel = 0
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 12)
+	corner.Parent = card
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, 15)
+	padding.PaddingBottom = UDim.new(0, 15)
+	padding.PaddingLeft = UDim.new(0, 20)
+	padding.PaddingRight = UDim.new(0, 20)
+	padding.Parent = card
+
+	-- Title
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Text = "CAMERA CONTROLS"
+	title.Font = Enum.Font.SourceSansBold
+	title.TextSize = 16
+	title.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, 0, 0, 20)
+	title.Position = UDim2.new(0, 0, 0, 0)
+	title.Parent = card
+
+	-- P - Switch Avatar
+	local pFrame = Instance.new("Frame")
+	pFrame.Size = UDim2.new(1, 0, 0, 25)
+	pFrame.Position = UDim2.new(0, 0, 0, 30)
+	pFrame.BackgroundTransparency = 1
+	pFrame.Parent = card
+
+	local pKeyFrame = Instance.new("Frame")
+	pKeyFrame.Size = UDim2.new(0, 100, 0, 22)  -- Made wider for consistency
+	pKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	pKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	pKeyFrame.BorderSizePixel = 0
+	pKeyFrame.Parent = pFrame
+
+	local pKeyCorner = Instance.new("UICorner")
+	pKeyCorner.CornerRadius = UDim.new(0, 6)
+	pKeyCorner.Parent = pKeyFrame
+
+	local pKeyLabel = Instance.new("TextLabel")
+	pKeyLabel.Text = "P"
+	pKeyLabel.Font = Enum.Font.SourceSansBold
+	pKeyLabel.TextSize = 16
+	pKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	pKeyLabel.BackgroundTransparency = 1
+	pKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	pKeyLabel.Parent = pKeyFrame
+
+	local pLabel = Instance.new("TextLabel")
+	pLabel.Text = "Switch To Another Avatar"
+	pLabel.Font = Enum.Font.SourceSansBold
+	pLabel.TextSize = 16
+	pLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	pLabel.BackgroundTransparency = 1
+	pLabel.Size = UDim2.new(0, 180, 1, 0)  -- Increased width from 120 to 180
+	pLabel.Position = UDim2.new(0, 110, 0, 0)
+	pLabel.TextXAlignment = Enum.TextXAlignment.Left
+	pLabel.Parent = pFrame
+
+	-- O - Switch Angle
+	local oFrame = Instance.new("Frame")
+	oFrame.Size = UDim2.new(1, 0, 0, 25)
+	oFrame.Position = UDim2.new(0, 0, 0, 60)
+	oFrame.BackgroundTransparency = 1
+	oFrame.Parent = card
+
+	local oKeyFrame = Instance.new("Frame")
+	oKeyFrame.Size = UDim2.new(0, 100, 0, 22)  -- Made wider for consistency
+	oKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	oKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	oKeyFrame.BorderSizePixel = 0
+	oKeyFrame.Parent = oFrame
+
+	local oKeyCorner = Instance.new("UICorner")
+	oKeyCorner.CornerRadius = UDim.new(0, 6)
+	oKeyCorner.Parent = oKeyFrame
+
+	local oKeyLabel = Instance.new("TextLabel")
+	oKeyLabel.Text = "O"
+	oKeyLabel.Font = Enum.Font.SourceSansBold
+	oKeyLabel.TextSize = 16
+	oKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	oKeyLabel.BackgroundTransparency = 1
+	oKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	oKeyLabel.Parent = oKeyFrame
+
+	local oLabel = Instance.new("TextLabel")
+	oLabel.Text = "Switch Angle"
+	oLabel.Font = Enum.Font.SourceSansBold
+	oLabel.TextSize = 16
+	oLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	oLabel.BackgroundTransparency = 1
+	oLabel.Size = UDim2.new(0, 180, 1, 0)  -- Increased width from 120 to 180
+	oLabel.Position = UDim2.new(0, 110, 0, 0)
+	oLabel.TextXAlignment = Enum.TextXAlignment.Left
+	oLabel.Parent = oFrame
+
+	-- U - Hide UI
+	local uFrame = Instance.new("Frame")
+	uFrame.Size = UDim2.new(1, 0, 0, 25)
+	uFrame.Position = UDim2.new(0, 0, 0, 90)
+	uFrame.BackgroundTransparency = 1
+	uFrame.Parent = card
+
+	local uKeyFrame = Instance.new("Frame")
+	uKeyFrame.Size = UDim2.new(0, 100, 0, 22)  -- Made wider for consistency
+	uKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	uKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	uKeyFrame.BorderSizePixel = 0
+	uKeyFrame.Parent = uFrame
+
+	local uKeyCorner = Instance.new("UICorner")
+	uKeyCorner.CornerRadius = UDim.new(0, 6)
+	uKeyCorner.Parent = uKeyFrame
+
+	local uKeyLabel = Instance.new("TextLabel")
+	uKeyLabel.Text = "U"
+	uKeyLabel.Font = Enum.Font.SourceSansBold
+	uKeyLabel.TextSize = 16
+	uKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	uKeyLabel.BackgroundTransparency = 1
+	uKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	uKeyLabel.Parent = uKeyFrame
+
+	local uLabel = Instance.new("TextLabel")
+	uLabel.Text = "Hide UI"
+	uLabel.Font = Enum.Font.SourceSansBold
+	uLabel.TextSize = 16
+	uLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	uLabel.BackgroundTransparency = 1
+	uLabel.Size = UDim2.new(0, 180, 1, 0)  -- Increased width from 120 to 180
+	uLabel.Position = UDim2.new(0, 110, 0, 0)
+	uLabel.TextXAlignment = Enum.TextXAlignment.Left
+	uLabel.Parent = uFrame
+
+	-- Hold Shift - Runway Walk (FIXED TEXT & WIDTH)
+	local runwayFrame = Instance.new("Frame")
+	runwayFrame.Size = UDim2.new(1, 0, 0, 25)
+	runwayFrame.Position = UDim2.new(0, 0, 0, 120)
+	runwayFrame.BackgroundTransparency = 1
+	runwayFrame.Parent = card
+
+	local runwayKeyFrame = Instance.new("Frame")
+	runwayKeyFrame.Size = UDim2.new(0, 100, 0, 22)  -- Wider for longer text
+	runwayKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	runwayKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	runwayKeyFrame.BorderSizePixel = 0
+	runwayKeyFrame.Parent = runwayFrame
+
+	local runwayKeyCorner = Instance.new("UICorner")
+	runwayKeyCorner.CornerRadius = UDim.new(0, 6)
+	runwayKeyCorner.Parent = runwayKeyFrame
+
+	local runwayKeyLabel = Instance.new("TextLabel")
+	runwayKeyLabel.Text = "Hold Shift"  -- Updated text
+	runwayKeyLabel.Font = Enum.Font.SourceSansBold
+	runwayKeyLabel.TextSize = 16
+	runwayKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	runwayKeyLabel.BackgroundTransparency = 1
+	runwayKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	runwayKeyLabel.Parent = runwayKeyFrame
+
+	local runwayLabel = Instance.new("TextLabel")
+	runwayLabel.Text = "Runway Walk"
+	runwayLabel.Font = Enum.Font.SourceSansBold
+	runwayLabel.TextSize = 16
+	runwayLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	runwayLabel.BackgroundTransparency = 1
+	runwayLabel.Size = UDim2.new(0, 180, 1, 0)  -- Increased width from 120 to 180
+	runwayLabel.Position = UDim2.new(0, 110, 0, 0)
+	runwayLabel.TextXAlignment = Enum.TextXAlignment.Left
+	runwayLabel.Parent = runwayFrame
+
+	-- C - Back to Standard Camera
+	local cFrame = Instance.new("Frame")
+	cFrame.Size = UDim2.new(1, 0, 0, 25)
+	cFrame.Position = UDim2.new(0, 0, 0, 150)
+	cFrame.BackgroundTransparency = 1
+	cFrame.Parent = card
+
+	local cKeyFrame = Instance.new("Frame")
+	cKeyFrame.Size = UDim2.new(0, 100, 0, 22)  -- Made wider for consistency
+	cKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	cKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	cKeyFrame.BorderSizePixel = 0
+	cKeyFrame.Parent = cFrame
+
+	local cKeyCorner = Instance.new("UICorner")
+	cKeyCorner.CornerRadius = UDim.new(0, 6)
+	cKeyCorner.Parent = cKeyFrame
+
+	local cKeyLabel = Instance.new("TextLabel")
+	cKeyLabel.Text = "C"
+	cKeyLabel.Font = Enum.Font.SourceSansBold
+	cKeyLabel.TextSize = 16
+	cKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	cKeyLabel.BackgroundTransparency = 1
+	cKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	cKeyLabel.Parent = cKeyFrame
+
+	local cLabel = Instance.new("TextLabel")
+	cLabel.Text = "Back to Standard Camera"
+	cLabel.Font = Enum.Font.SourceSansBold
+	cLabel.TextSize = 16
+	cLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	cLabel.BackgroundTransparency = 1
+	cLabel.Size = UDim2.new(0, 180, 1, 0)  -- Increased width from 120 to 180
+	cLabel.Position = UDim2.new(0, 110, 0, 0)
+	cLabel.TextXAlignment = Enum.TextXAlignment.Left
+	cLabel.Parent = cFrame
+
+	return card
+end
+
+local function createControlHints()
+	-- Desktop UI creation only
+	controlHintsGui = Instance.new("ScreenGui")
+	controlHintsGui.Name = "CameraControlHints"
+	controlHintsGui.ResetOnSpawn = false
+	controlHintsGui.IgnoreGuiInset = true
+	controlHintsGui.Parent = playerGui
+
+	-- Create Mode 2 container
+	mode2Card = createMode2Card()
+	mode2Card.Parent = controlHintsGui
+	mode2Card.Visible = false  -- Initially hidden
+
+	-- Mode 1 card
+	mode1Card = createMode1Card()
+	mode1Card.Parent = controlHintsGui
+	mode1Card.Visible = true   -- Initially visible (Mode 1 is default)
+
+	-- Mode 3 card
+	mode3Card = createMode3Card()
+	mode3Card.Parent = controlHintsGui
+	mode3Card.Visible = false  -- Initially hidden
+
+	-- Create camera icon button
+	cameraIconButton = createCameraIconButton()
+
+	-- Update initial visibility
+	updateUIVisibility()
+end
+
+----------------------------------------
+-- UI VISIBILITY MANAGEMENT
+----------------------------------------
+function updateUIVisibility()
+	-- Camera icon visibility (also respect uiHidden state)
+	if cameraIconButton and cameraIconButton.Parent then
+		cameraIconButton.Parent.Enabled = STATE.cameraIconOnly and not STATE.uiHidden
+	end
+
+	-- Main camera UI visibility
+	if controlHintsGui then
+		controlHintsGui.Enabled = STATE.cameraUIVisible and not STATE.uiHidden
+
+		-- Show correct mode card
+		if mode1Card then mode1Card.Visible = (STATE.mode == 1) and STATE.cameraUIVisible end
+		if mode2Card then mode2Card.Visible = (STATE.mode == 2) and STATE.cameraUIVisible end
+		if mode3Card then mode3Card.Visible = (STATE.mode == 3) and STATE.cameraUIVisible end
+	end
+end
+
+local function setUIVisibility(visible)
+	STATE.uiHidden = not visible
+
+	-- Toggle ALL core GUIs including Roblox menu
+	pcall(function()
+		if not visible then
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, false)
+			StarterGui:SetCore("TopbarEnabled", false)
+		else
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, true)
+			StarterGui:SetCore("TopbarEnabled", true)
+		end
+	end)
+
+	-- Toggle all ScreenGuis in PlayerGui
+	for _, gui in ipairs(playerGui:GetChildren()) do
+		if gui:IsA("ScreenGui") then
+			if gui.Name == "CameraControlHints" then
+				-- Handle separately in updateUIVisibility
+			elseif gui.Name == "CameraIconGUI" then
+				-- Also hide camera icon when U is pressed
+				gui.Enabled = visible
+			elseif gui.Name ~= "CameraSystemUI" then
+				gui.Enabled = visible
+			end
+		end
+	end
+
+	-- Automatically hide/show mouse with UI
+	if not visible then
+		UserInputService.MouseIconEnabled = false
+	else
+		if not (STATE.mode == 1 and isRMB) and not (STATE.mode == 2 and isRMB) then
+			UserInputService.MouseIconEnabled = true
+		end
+	end
+
+	updateUIVisibility()
+end
+
+-- Exit to icon function
+local function exitToIcon()
+	STATE.cameraIconOnly = true
+	STATE.cameraUIVisible = false
+	updateUIVisibility()
+end
+
+----------------------------------------
+-- HOVER EFFECT - ONLY FOR MODE 3 (CINEMATIC)
+----------------------------------------
+local function calculateDynamicHover(cfg, dt)
+	if cfg.FloatIntensity == 0 then
+		return Vector3.new(0, 0, 0), CFrame.new()
+	end
+
+	local t = tick() * cfg.FloatSpeed
+
+	local floatPosOffset = Vector3.new(
+		math.sin(t * 1.3) * cfg.FloatIntensity,
+		math.sin(t * 1.7) * cfg.FloatIntensity * 1.2,
+		math.sin(t * 1.1) * cfg.FloatIntensity * 0.8
+	)
+
+	local floatRotOffset = CFrame.Angles(
+		math.sin(t * 0.9) * cfg.RotationIntensity,
+		math.sin(t * 1.1) * cfg.RotationIntensity,
+		0
+	)
+
+	return floatPosOffset, floatRotOffset
+end
+
+----------------------------------------
+-- SMOOTH ZOOM SYSTEM FOR MODE 2
+----------------------------------------
+local function updateSmoothZoom(dt)
+	local cfg = CFG.MODE2
+
+	local zoomDiff = STATE.targetZoom - STATE.actualZoom
+	STATE.zoomVelocity = STATE.zoomVelocity * cfg.zoomDamping + zoomDiff * cfg.zoomSpeed
+	STATE.actualZoom = STATE.actualZoom + STATE.zoomVelocity
+
+	local limitFactor = 1
+	if STATE.actualZoom < cfg.zoomMin * 1.2 then
+		limitFactor = (STATE.actualZoom - cfg.zoomMin) / (cfg.zoomMin * 0.2)
+		limitFactor = clamp(limitFactor, 0.1, 1)
+	elseif STATE.actualZoom > cfg.zoomMax * 0.8 then
+		limitFactor = (cfg.zoomMax - STATE.actualZoom) / (cfg.zoomMax * 0.2)
+		limitFactor = clamp(limitFactor, 0.1, 1)
+	end
+
+	STATE.zoomVelocity = STATE.zoomVelocity * limitFactor
+	STATE.currentZoom = clamp(STATE.actualZoom, cfg.zoomMin, cfg.zoomMax)
+end
+
+----------------------------------------
+-- AFK DETECTION
+----------------------------------------
+local function updateActivity()
+	STATE.lastActivity = tick()
+	if STATE.wasAFK then
+		STATE.mode = STATE.previousMode
+		STATE.wasAFK = false
+		STATE.isRunning = false
+		STATE.smoothedFacePosition = nil
+
+		updateUIVisibility()
+	end
+end
+
+local function checkAFK()
+	if not STATE.wasAFK and (tick() - STATE.lastActivity) > CFG.AFK.timeout then
+		STATE.previousMode = STATE.mode
+		STATE.mode = 3
+		STATE.wasAFK = true
+		STATE.lastT = tick()
+		STATE.camIdx = math.random(1, #SHOTS)
+
+		updateUIVisibility()
+	end
+end
+
+----------------------------------------
+-- CAMERA UPDATERS
+----------------------------------------
+local function updateMode1(dt)
+	local cfg = CFG.MODE1
+	
+	-- Handle runway walk with Shift
+	if isRunwayWalk then
+		humanoid.WalkSpeed = cfg.runwayWalkSpeed
+	else
+		humanoid.WalkSpeed = cfg.walk
+	end
+
+	-- Detect if avatar is running
+	local avatarVel = root.AssemblyLinearVelocity
+	STATE.avatarVelocity = avatarVel
+	local wasMoving = STATE.isAvatarMoving
+	STATE.isAvatarMoving = avatarVel.Magnitude > 2
+
+	-- SMOOTH ZOOM TRANSITION when starting/stopping running
+	if STATE.isAvatarMoving then
+		STATE.targetRunningZoom = cfg.runningZoomOut or 1.2
+	else
+		STATE.targetRunningZoom = 1.0
+	end
+
+	STATE.currentRunningZoom = lerp(STATE.currentRunningZoom, STATE.targetRunningZoom, cfg.returnSmoothFactor)
+
+	-- EXACT ORIGINAL APPROACH: Fixed offset from root, adjusted for face
+	local rootPos = root.Position
+	local rawHeadPos = rootPos + Vector3.new(0, 1.5, 0)  -- Face level position
+
+	-- Initialize if needed
+	if not STATE.smoothedFacePosition then
+		STATE.smoothedFacePosition = rawHeadPos
+	end
+
+	local headPos
+	if STATE.isAvatarMoving then
+		STATE.smoothedFacePosition = STATE.smoothedFacePosition:Lerp(rawHeadPos, cfg.headSmoothFactor)
+		headPos = STATE.smoothedFacePosition
+	else
+		STATE.smoothedFacePosition = rawHeadPos
+		headPos = rawHeadPos
+	end
+
+	STATE.angX = clamp(STATE.angX, cfg.verticalAngleLimits.min, cfg.verticalAngleLimits.max)
+
+	local adjustedZoom = STATE.zoom * STATE.currentRunningZoom
+
+	local horizontalRadius = math.cos(rad(STATE.angX)) * adjustedZoom
+	local verticalOffset = math.sin(rad(STATE.angX)) * adjustedZoom
+
+	local cameraOffset = Vector3.new(
+		horizontalRadius * math.sin(rad(STATE.angY)),
+		verticalOffset,
+		horizontalRadius * math.cos(rad(STATE.angY))
+	)
+
+	local targetPos = headPos + cameraOffset
+	local direction = targetPos - headPos
+	local distance = direction.Magnitude
+
+	if distance > 0.1 then
+		local result = Workspace:Raycast(headPos, direction, raycastParams)
+
+		if result then
+			if not shouldIgnoreForCollision(result.Instance) then
+				local hitPoint = result.Position
+				local distToWall = (hitPoint - headPos).Magnitude - cfg.collisionBufferDistance
+
+				if distToWall < distance then
+					targetPos = headPos + direction.Unit * math.max(0.5, distToWall)
+				end
+			end
+		end
+	end
+
+	local cameraCFrame = CFrame.lookAt(targetPos, headPos)
+	camera.CFrame = camera.CFrame:Lerp(cameraCFrame, cfg.smooth)
+end
+
+local function updateMode2(dt)
+	local cfg = CFG.MODE2
+
+	local freeRot = CFrame.fromEulerAnglesYXZ(rad(STATE.freePitch), rad(STATE.freeYaw), rad(STATE.cameraRoll))
+
+	-- Handle movement for desktop
+	local moveDir = Vector3.new(
+		(STATE.keys.D and 1 or 0) - (STATE.keys.A and 1 or 0),
+		(STATE.keys.R and 1 or 0) - (STATE.keys.F and 1 or 0),
+		(STATE.keys.S and 1 or 0) - (STATE.keys.W and 1 or 0)
+	)
+
+	-- Handle runway walk with Shift
+	if isRunwayWalk then
+		-- Enable avatar walking at runway walk speed
+		humanoid.WalkSpeed = cfg.runwayWalkSpeed
+		
+		-- Also allow camera movement during runway walk (similar to Hold T)
+		if moveDir.Magnitude > 0 then
+			raycastParams.FilterDescendantsInstances = {char}
+			
+			-- Use slower camera speed for runway walk (speed: 6)
+			local currentSpeed = cfg.runwaySpeed or 6
+			local moveVector = freeRot:VectorToWorldSpace(moveDir.Unit) * currentSpeed * dt
+			local sphereRadius = cfg.CollisionSphereRadius
+
+			local result = Workspace:Spherecast(STATE.freePos, sphereRadius, moveVector, raycastParams)
+
+			if result then
+				if shouldIgnoreForCollision(result.Instance) then
+					STATE.freePos = STATE.freePos + moveVector
+				else
+					local normal = result.Normal
+					local projection = moveVector:Dot(normal)
+					local slideVector = moveVector - normal * projection
+
+					local slideResult = Workspace:Spherecast(STATE.freePos, sphereRadius, slideVector, raycastParams)
+
+					if slideResult and not shouldIgnoreForCollision(slideResult.Instance) then
+						moveVector = Vector3.zero
+					else
+						moveVector = slideVector
+					end
+
+					STATE.freePos = STATE.freePos + moveVector
+				end
+			else
+				STATE.freePos = STATE.freePos + moveVector
+			end
+		end
+	elseif STATE.isRunning and moveDir.Magnitude > 0 then
+		humanoid.WalkSpeed = cfg.runWalkSpeed
+	else
+		humanoid.WalkSpeed = 0
+	end
+
+	updateSmoothZoom(dt)
+
+	local zoomFOV = cfg.baseFOV / STATE.currentZoom
+	camera.FieldOfView = clamp(zoomFOV, 15, 120)
+
+	-- Handle Q/E tilt
+	if STATE.keys.Q then
+		STATE.rollVelocity = STATE.rollVelocity + cfg.rollSpeed * dt
+	elseif STATE.keys.E then
+		STATE.rollVelocity = STATE.rollVelocity - cfg.rollSpeed * dt
+	else
+		STATE.rollVelocity = STATE.rollVelocity * cfg.rollDamping
+	end
+
+	STATE.cameraRoll = STATE.cameraRoll + STATE.rollVelocity * dt
+	STATE.cameraRoll = clamp(STATE.cameraRoll, -90, 90)
+
+	freeRot = CFrame.fromEulerAnglesYXZ(rad(STATE.freePitch), rad(STATE.freeYaw), rad(STATE.cameraRoll))
+
+	-- Only move camera if not in runway walk mode (already handled above)
+	if not isRunwayWalk and moveDir.Magnitude > 0 then
+		raycastParams.FilterDescendantsInstances = {char}
+
+		-- Use the dynamically calculated speed based on the flight speed slider
+		local currentSpeed = STATE.isRunning and cfg.runSpeed or cfg.speed
+		local moveVector = freeRot:VectorToWorldSpace(moveDir.Unit) * currentSpeed * dt
+		local sphereRadius = cfg.CollisionSphereRadius
+
+		local result = Workspace:Spherecast(STATE.freePos, sphereRadius, moveVector, raycastParams)
+
+		if result then
+			if shouldIgnoreForCollision(result.Instance) then
+				STATE.freePos = STATE.freePos + moveVector
+			else
+				local normal = result.Normal
+				local projection = moveVector:Dot(normal)
+				local slideVector = moveVector - normal * projection
+
+				local slideResult = Workspace:Spherecast(STATE.freePos, sphereRadius, slideVector, raycastParams)
+
+				if slideResult and not shouldIgnoreForCollision(slideResult.Instance) then
+					moveVector = Vector3.zero
+				else
+					moveVector = slideVector
+				end
+
+				STATE.freePos = STATE.freePos + moveVector
+			end
+		else
+			STATE.freePos = STATE.freePos + moveVector
+		end
+	end
+
+	local isMoving = moveDir.Magnitude > 0
+	if isMoving then
+		STATE.lastMoveDir = moveDir.Unit
+	elseif not isMoving and STATE.lastMoveDir.Magnitude > 0 then
+		STATE.bounceVelocity = STATE.bounceVelocity + STATE.lastMoveDir * cfg.BounceForce
+		STATE.lastMoveDir = Vector3.new(0, 0, 0)
+	end
+	STATE.bounceVelocity = lerp(STATE.bounceVelocity, Vector3.zero, dt * cfg.BounceDamping)
+	local bounceOffset = freeRot:VectorToWorldSpace(STATE.bounceVelocity * dt)
+
+	local finalPos = STATE.freePos + bounceOffset
+	local finalCFrame = CFrame.new(finalPos) * freeRot
+
+	camera.CFrame = lerp(camera.CFrame, finalCFrame, cfg.smooth)
+end
+
+local function updateMode3(dt)
+	local cfg = CFG.MODE3
+
+	-- Handle runway walk with Shift
+	if isRunwayWalk then
+		humanoid.WalkSpeed = cfg.runwayWalkSpeed
+	else
+		humanoid.WalkSpeed = 16  -- Normal cinematic mode speed
+	end
+
+	if STATE.playerSwitching then
+		STATE.playerSwitchTime = STATE.playerSwitchTime + dt
+		local t = STATE.playerSwitchTime / cfg.playerSwitchDuration
+
+		if t >= 1 then
+			STATE.playerSwitching = false
+			STATE.cinematicTarget = STATE.playerSwitchTo
+		else
+			t = 1 - (1 - t) * (1 - t) * (1 - t)
+		end
+	else
+		local now = tick()
+		if now - STATE.lastT > cfg.switch then
+			STATE.camIdx = (STATE.camIdx % #SHOTS) + 1
+			STATE.lastT = now
+		end
+	end
+
+	local now = tick()
+	local t = math.min(1, (now - STATE.lastT) / cfg.switch)
+	t = 3*t*t - 2*t*t*t
+
+	local s1 = SHOTS[STATE.camIdx]
+	local s2 = SHOTS[((STATE.camIdx) % #SHOTS) + 1]
+
+	local d = s1.d + (s2.d - s1.d) * t
+	local h = s1.h + (s2.h - s1.h) * t
+	local v = s1.v + (s2.v - s1.v) * t
+	local fov = s1.fov + (s2.fov - s1.fov) * t
+	local off = s1.off:Lerp(s2.off, t)
+
+	local targetChar = STATE.cinematicTarget.Character
+	if not targetChar then return end
+
+	local headPos = getStableFacePosition(targetChar)
+	local avatarHeight = getAvatarHeight(targetChar)
+	local focusPos = headPos - Vector3.new(0, avatarHeight * 0.3, 0)  -- Focus on upper body
+
+	if STATE.playerSwitching and STATE.playerSwitchFrom and STATE.playerSwitchFrom.Character then
+		local fromPos = getStableFacePosition(STATE.playerSwitchFrom.Character)
+		local toPos = getStableFacePosition(STATE.playerSwitchTo.Character)
+		local switchT = STATE.playerSwitchTime / cfg.playerSwitchDuration
+		switchT = 1 - (1 - switchT) * (1 - switchT) * (1 - switchT)
+		focusPos = fromPos:Lerp(toPos, switchT) - Vector3.new(0, avatarHeight * 0.3, 0)
+	end
+
+	local angleCFrame = CFrame.fromEulerAnglesYXZ(rad(v), rad(h), 0)
+	local offset = angleCFrame:VectorToWorldSpace(Vector3.new(0, 0, d))
+
+	local floatPosOffset, floatRotOffset = calculateDynamicHover(cfg, dt)
+
+	local targetPos = focusPos + offset + off + floatPosOffset
+	local lookAtPos = focusPos + off
+
+	local filterList = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Character then
+			table.insert(filterList, p.Character)
+		end
+	end
+
+	local finalCFrame = getOrbitalCollisionCFrame(targetPos, lookAtPos, filterList)
+	finalCFrame = finalCFrame * floatRotOffset
+
+	camera.CFrame = lerp(camera.CFrame, finalCFrame, cfg.smooth)
+	camera.FieldOfView = lerp(camera.FieldOfView, fov, cfg.smooth)
+end
+
+----------------------------------------
+-- INPUT HANDLING
+----------------------------------------
+local function switchPlayer()
+	if STATE.mode ~= 3 then return end
+
+	local players = getPlayersInOrder()
+	if #players <= 1 then return end
+
+	local currentIndex = 1
+	for i, p in ipairs(players) do
+		if p == STATE.cinematicTarget then
+			currentIndex = i
+			break
+		end
+	end
+
+	local nextIndex = (currentIndex % #players) + 1
+	local nextPlayer = players[nextIndex]
+
+	STATE.playerSwitching = true
+	STATE.playerSwitchTime = 0
+	STATE.playerSwitchFrom = STATE.cinematicTarget
+	STATE.playerSwitchTo = nextPlayer
+	STATE.cinematicTargetIndex = nextIndex
+end
+
+local function rmbAction(action, state)
+	if action == "RMB" then
+		isRMB = (state == Enum.UserInputState.Begin)
+
+		if STATE.mode == 1 or STATE.mode == 2 then
+			if isRMB then
+				UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition
+				UserInputService.MouseIconEnabled = false
+			else
+				UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+				if not STATE.uiHidden then
+					UserInputService.MouseIconEnabled = true
+				end
+			end
+		end
+
+		updateActivity()
+	end
+	return Enum.ContextActionResult.Sink
+end
+
+local function switchMode(_, state)
+	if state ~= Enum.UserInputState.Begin then return end
+
+	-- NEW CYCLE LOGIC:
+	-- Hidden Icon -> Show Mode 1 UI -> Mode 2 -> Mode 3 -> Back to Hidden Icon
+
+	if STATE.cameraIconOnly then
+		-- If UI is hidden to icon, show Mode 1 UI
+		STATE.cameraIconOnly = false
+		STATE.cameraUIVisible = true
+		-- Stay in Mode 1
+	elseif STATE.mode == 1 then
+		-- Mode 1 with UI visible -> Mode 2
+		STATE.mode = 2
+		STATE.cameraUIVisible = true
+		STATE.cameraIconOnly = false
+	elseif STATE.mode == 2 then
+		-- Mode 2 -> Mode 3
+		STATE.mode = 3
+		STATE.cameraUIVisible = true
+		STATE.cameraIconOnly = false
+	elseif STATE.mode == 3 then
+		-- Mode 3 -> Back to Mode 1 with hidden UI (icon only)
+		STATE.mode = 1
+		STATE.cameraUIVisible = false
+		STATE.cameraIconOnly = true
+	end
+
+	local cfg = CFG["MODE" .. STATE.mode]
+
+	if STATE.mode == 1 then
+		STATE.zoom = CFG.MODE1.zoom.def
+		STATE.angX = 0
+		STATE.angY = 180
+		camera.FieldOfView = 70
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = not STATE.uiHidden
+		STATE.previousCollisionDistance = math.huge
+		STATE.lastValidCameraPosition = nil
+		STATE.isRunning = false
+		-- Reset smoothed position to nil (let updateMode1 initialize it)
+		STATE.smoothedFacePosition = nil
+	elseif STATE.mode == 2 then
+		STATE.freePos = camera.CFrame.Position
+		local _, yaw, pitch = camera.CFrame:ToEulerAnglesYXZ()
+		STATE.freeYaw = deg(yaw)
+		STATE.freePitch = clamp(deg(pitch), CFG.MODE2.verticalAngleLimits.min, CFG.MODE2.verticalAngleLimits.max)
+		STATE.cameraRoll = 0
+		STATE.rollVelocity = 0
+		STATE.currentZoom = 1.0
+		STATE.targetZoom = 1.0
+		STATE.actualZoom = 1.0
+		STATE.zoomVelocity = 0
+		STATE.isRunning = false
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = not STATE.uiHidden
+	else
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		camera.FieldOfView = 70
+		UserInputService.MouseIconEnabled = not STATE.uiHidden
+		STATE.cinematicTarget = player
+		STATE.cinematicTargetIndex = 1
+		STATE.isRunning = false
+		STATE.camIdx = math.random(1, #SHOTS)
+		STATE.lastT = tick()
+	end
+
+	updateUIVisibility()
+
+	if not STATE.cameraIconOnly then
+		print("📷 Mode " .. STATE.mode .. " (" .. cfg.name .. ")")
+	end
+
+	updateActivity()
+	return Enum.ContextActionResult.Sink
+end
+
+local function toggleUI(_, state)
+	if state ~= Enum.UserInputState.Begin then return end
+	setUIVisibility(STATE.uiHidden)
+	updateActivity()
+	return Enum.ContextActionResult.Sink
+end
+
+local function keyBegan(input, gp)
+	if gp then return end
+
+	if input.KeyCode == Enum.KeyCode.Escape and STATE.uiHidden then
+		setUIVisibility(true)
+		updateActivity()
+		return
+	end
+
+	-- Shift key for runway walk
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		isRunwayWalk = true
+		updateActivity()
+		return
+	end
+
+	-- X key - Exit to icon (only for Mode 1 and 2, not Mode 3)
+	if input.KeyCode == Enum.KeyCode.X then
+		if STATE.mode == 1 then
+			exitToIcon()
+		elseif STATE.mode == 2 then
+			-- Switch to Mode 1 and hide to icon
+			STATE.mode = 1
+			STATE.cameraIconOnly = true
+			STATE.cameraUIVisible = false
+
+			-- Reset Mode 1 settings
+			STATE.zoom = CFG.MODE1.zoom.def
+			STATE.angX = 0
+			STATE.angY = 180
+			camera.FieldOfView = 70
+			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+			UserInputService.MouseIconEnabled = not STATE.uiHidden
+			-- Reset smoothed position to nil
+			STATE.smoothedFacePosition = nil
+
+			updateUIVisibility()
+		end
+		-- Mode 3 does not respond to X key
+		updateActivity()
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.P and STATE.mode == 3 then
+		switchPlayer()
+		updateActivity()
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.O and STATE.mode == 3 then
+		STATE.camIdx = math.random(1, #SHOTS)
+		STATE.lastT = tick()
+		updateActivity()
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.T and STATE.mode == 2 then
+		STATE.isRunning = true
+		updateActivity()
+		return
+	end
+
+	STATE.keys[input.KeyCode.Name] = true
+	updateActivity()
+end
+
+local function keyEnded(input, gp)
+	if gp then return end
+
+	-- Shift key release
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		isRunwayWalk = false
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.T and STATE.mode == 2 then
+		STATE.isRunning = false
+		return
+	end
+
+	STATE.keys[input.KeyCode.Name] = nil
+end
+
+local function wheel(input)
+	if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+
+	if STATE.mode == 1 then
+		local cfg = CFG.MODE1
+		local z = STATE.zoom - input.Position.Z * cfg.wheelSens
+		STATE.zoom = clamp(z, cfg.zoom.min, cfg.zoom.max)
+	elseif STATE.mode == 2 then
+		local cfg = CFG.MODE2
+		local zoomDelta = -input.Position.Z * cfg.zoomSensitivity
+		STATE.targetZoom = clamp(STATE.targetZoom + zoomDelta, cfg.zoomMin, cfg.zoomMax)
+		if math.abs(STATE.actualZoom - STATE.targetZoom) > 1 then
+			STATE.actualZoom = STATE.targetZoom
+		end
+	end
+
+	updateActivity()
+end
+
+local function mouseMove(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		local delta = input.Delta
+
+		if STATE.mode == 1 and isRMB then
+			local cfg = CFG.MODE1
+			local sensModifier = STATE.sensitivityMode1
+
+			STATE.angY = STATE.angY - delta.X * SENS.MODE1 * sensModifier
+			STATE.angX = STATE.angX + delta.Y * SENS.MODE1 * sensModifier
+
+			STATE.angX = clamp(STATE.angX, cfg.verticalAngleLimits.min, cfg.verticalAngleLimits.max)
+			STATE.angY = STATE.angY % 360
+		elseif STATE.mode == 2 and isRMB then
+			local cfg = CFG.MODE2
+			local sensModifier = STATE.sensitivityMode2
+
+			STATE.freeYaw = STATE.freeYaw - delta.X * SENS.MODE2 * sensModifier
+			STATE.freePitch = clamp(STATE.freePitch - delta.Y * SENS.MODE2 * sensModifier, cfg.verticalAngleLimits.min, cfg.verticalAngleLimits.max)
+		end
+
+		updateActivity()
+	end
+end
+
+local function onCharacterMove()
+	updateActivity()
+end
+
+----------------------------------------
+-- STARTUP & CLEANUP
+----------------------------------------
+local conns = {}
+
+local function start()
+	math.randomseed(tick())
+
+	-- Initialize camera to Mode 1 (Aerial)
+	camera.CameraType = Enum.CameraType.Scriptable
+
+	local headPos = getStableFacePosition()
+
+	-- Set initial Mode 1 state
+	STATE.mode = 1
+	STATE.zoom = CFG.MODE1.zoom.def
+	STATE.angX = 0
+	STATE.angY = 180
+	STATE.smoothedFacePosition = headPos
+
+	-- Initialize Mode 2 state (for when switching)
+	STATE.freePos = headPos + Vector3.new(0, 0, CFG.MODE1.zoom.def)
+	STATE.freeYaw = 0
+	STATE.freePitch = 0
+	STATE.cameraRoll = 0
+	STATE.rollVelocity = 0
+	STATE.actualZoom = 1.0
+	STATE.zoomVelocity = 0
+	STATE.lastActivity = tick()
+
+	-- Initialize flight speed based on current slider value (max by default)
+	local cfg = CFG.MODE2
+	cfg.speed = cfg.minSpeed + (cfg.maxSpeed - cfg.minSpeed) * STATE.flightSpeedMode2
+	cfg.runSpeed = cfg.minRunSpeed + (cfg.maxRunSpeed - cfg.minRunSpeed) * STATE.flightSpeedMode2
+
+	-- Create control hints UI (desktop only)
+	createControlHints()
+
+	-- Desktop-only bindings
+	ContextActionService:BindAction("SwitchMode", switchMode, false, Enum.KeyCode.C)
+	ContextActionService:BindAction("ToggleUI", toggleUI, false, Enum.KeyCode.U)
+
+	-- Common bindings
+	ContextActionService:BindAction("RMB", rmbAction, false, Enum.UserInputType.MouseButton2)
+
+	conns[#conns + 1] = UserInputService.InputBegan:Connect(keyBegan)
+	conns[#conns + 1] = UserInputService.InputEnded:Connect(keyEnded)
+	conns[#conns + 1] = UserInputService.InputChanged:Connect(function(input)
+		wheel(input)
+		mouseMove(input)
+	end)
+
+	-- Character movement detection
+	conns[#conns + 1] = humanoid:GetPropertyChangedSignal("MoveDirection"):Connect(onCharacterMove)
+
+	conns[#conns + 1] = RunService.RenderStepped:Connect(function(dt)
+		checkAFK()
+
+		if STATE.mode == 0 then return end
+		camera.CameraType = Enum.CameraType.Scriptable
+		if STATE.mode == 1 then updateMode1(dt)
+		elseif STATE.mode == 2 then updateMode2(dt)
+		elseif STATE.mode == 3 then updateMode3(dt) end
+	end)
+
+	print("✅ Camera V8.3 Production Ready - PC Only Edition")
+	print("📷 Mode 1 Active - Aerial Camera")
+	print("🖱️ Touchpad: 2-finger pan to rotate camera")
+	print("📌 X - Exit to Icon | C - Mode Switch | U - Hide All UI")
+	print("👠 Hold Shift - Runway Walk (5 speed)")
+	print("⏰ AFK: Auto-cinematic after 3 minutes")
+	print("📱 Mobile/VR: Standard Roblox camera (unchanged)")
+end
+
+local function cleanup()
+	for _, c in ipairs(conns) do c:Disconnect() end
+	table.clear(conns)
+
+	ContextActionService:UnbindAction("SwitchMode")
+	ContextActionService:UnbindAction("ToggleUI")
+	ContextActionService:UnbindAction("RMB")
+
+	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+	UserInputService.MouseIconEnabled = true
+	setUIVisibility(true)
+
+	-- Clean up control hints
+	if controlHintsGui then
+		controlHintsGui:Destroy()
+		controlHintsGui = nil
+		mode1Card = nil
+		mode2Card = nil
+		mode3Card = nil
+	end
+
+	if cameraIconButton and cameraIconButton.Parent then
+		cameraIconButton.Parent:Destroy()
+		cameraIconButton = nil
+	end
+end
+
+char.AncestryChanged:Connect(function(_, parent) if not parent then cleanup() end end)
+player.CharacterAdded:Connect(function(newChar)
+	cleanup()
+	char, root, humanoid = newChar, newChar:WaitForChild("HumanoidRootPart"), newChar:WaitForChild("Humanoid")
+	raycastParams.FilterDescendantsInstances = {char}
+	playerGui = player:WaitForChild("PlayerGui")
+
+	-- Reset smoothedFacePosition for new character
+	STATE.smoothedFacePosition = nil
+
+	start()
+end)
+
+start()
