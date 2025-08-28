@@ -1,3 +1,5 @@
+To try it out - camera is live in "Trippingout Hub" https://www.roblox.com/share?code=d0f365461fbc33478cffb196837bfab1&type=ExperienceDetails&stamp=1756400669737
+
 HOW TO IMPLEMENT IT:
 
 	1.	Open Roblox Studio and create a new world (or use your existing one).
