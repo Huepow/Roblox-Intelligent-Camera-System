@@ -1,5 +1,7 @@
 ----------------------------------------
--- ROBLOX INTELLIGENT CAMERA SYSTEM 
+-- ROBLOX CAMERA SYSTEM V8.3 - PRODUCTION READY
+-- Enhanced with UI Icon System & Stable Face Zoom
+-- Fixed Runway Walk with Shift Key
 ----------------------------------------
 
 ----------------------------------------
@@ -178,7 +180,7 @@ local CFG = {
 		headSmoothFactor = 0.35,  -- Original value for stability
 		returnSmoothFactor = 0.5,
 		runningZoomOut = 1.0,
-		runwayWalkSpeed = 5,  -- Speed for runway walk
+		runwayWalkSpeed = 6.5,  -- Speed for runway walk
 	},
 	MODE2 = {
 		name = "HANDHELD",
@@ -206,8 +208,8 @@ local CFG = {
 		rollSpeed = 30,
 		rollDamping = 0.30,
 		runWalkSpeed = 20,
-		runwayWalkSpeed = 5,  -- Speed for runway walk
-		runwaySpeed = 6,  -- Camera speed during runway walk
+		runwayWalkSpeed = 6.5,  -- Speed for runway walk
+		runwaySpeed = 7.5,  -- Camera speed during runway walk
 	},
 	MODE3 = {
 		name = "CINEMATIC",
@@ -218,7 +220,9 @@ local CFG = {
 		FloatSpeed = 0.25,
 		RotationIntensity = 0.05,
 		playerSwitchDuration = 2.0,
-		runwayWalkSpeed = 5,  -- Speed for runway walk
+		runwayWalkSpeed = 6.5,  -- Speed for runway walk
+		zoom = {min = 0.2, max = 5, def = 1.0},  -- Zoom settings for cinematic
+		wheelSens = 0.2,  -- Wheel sensitivity for cinematic zoom
 	},
 	AFK = {
 		timeout = 180
@@ -297,6 +301,8 @@ local STATE = {
 	-- New UI states
 	cameraUIVisible = false,  -- Start with camera UI hidden
 	cameraIconOnly = true,    -- Show icon at start
+	-- Cinematic zoom state
+	cinematicZoom = 1.0,  -- Current zoom multiplier for cinematic mode
 }
 
 -- Sensitivities
@@ -913,8 +919,8 @@ end
 local function createMode3Card()
 	local card = Instance.new("Frame")
 	card.Name = "Mode3Card"
-	card.Size = UDim2.new(0, 320, 0, 210)  -- Increased width from 260 to 320
-	card.Position = UDim2.new(1, -340, 1, -230)  -- Adjusted position for wider card
+	card.Size = UDim2.new(0, 320, 0, 240)  -- Increased height for wheel control
+	card.Position = UDim2.new(1, -340, 1, -260)  -- Adjusted position
 	card.BackgroundColor3 = Color3.new(0.15, 0.15, 0.15)
 	card.BackgroundTransparency = 0.3
 	card.BorderSizePixel = 0
@@ -1018,10 +1024,48 @@ local function createMode3Card()
 	oLabel.TextXAlignment = Enum.TextXAlignment.Left
 	oLabel.Parent = oFrame
 
+	-- Wheel - Zoom In/Out (NEW)
+	local wheelFrame = Instance.new("Frame")
+	wheelFrame.Size = UDim2.new(1, 0, 0, 25)
+	wheelFrame.Position = UDim2.new(0, 0, 0, 90)
+	wheelFrame.BackgroundTransparency = 1
+	wheelFrame.Parent = card
+
+	local wheelKeyFrame = Instance.new("Frame")
+	wheelKeyFrame.Size = UDim2.new(0, 100, 0, 22)
+	wheelKeyFrame.Position = UDim2.new(0, 0, 0, 0)
+	wheelKeyFrame.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+	wheelKeyFrame.BorderSizePixel = 0
+	wheelKeyFrame.Parent = wheelFrame
+
+	local wheelKeyCorner = Instance.new("UICorner")
+	wheelKeyCorner.CornerRadius = UDim.new(0, 6)
+	wheelKeyCorner.Parent = wheelKeyFrame
+
+	local wheelKeyLabel = Instance.new("TextLabel")
+	wheelKeyLabel.Text = "Wheel"
+	wheelKeyLabel.Font = Enum.Font.SourceSansBold
+	wheelKeyLabel.TextSize = 16
+	wheelKeyLabel.TextColor3 = Color3.new(0.95, 0.95, 0.95)
+	wheelKeyLabel.BackgroundTransparency = 1
+	wheelKeyLabel.Size = UDim2.new(1, 0, 1, 0)
+	wheelKeyLabel.Parent = wheelKeyFrame
+
+	local wheelLabel = Instance.new("TextLabel")
+	wheelLabel.Text = "Zoom In/Out"
+	wheelLabel.Font = Enum.Font.SourceSansBold
+	wheelLabel.TextSize = 16
+	wheelLabel.TextColor3 = Color3.new(0.9, 0.9, 0.9)
+	wheelLabel.BackgroundTransparency = 1
+	wheelLabel.Size = UDim2.new(0, 180, 1, 0)
+	wheelLabel.Position = UDim2.new(0, 110, 0, 0)
+	wheelLabel.TextXAlignment = Enum.TextXAlignment.Left
+	wheelLabel.Parent = wheelFrame
+
 	-- U - Hide UI
 	local uFrame = Instance.new("Frame")
 	uFrame.Size = UDim2.new(1, 0, 0, 25)
-	uFrame.Position = UDim2.new(0, 0, 0, 90)
+	uFrame.Position = UDim2.new(0, 0, 0, 120)
 	uFrame.BackgroundTransparency = 1
 	uFrame.Parent = card
 
@@ -1056,10 +1100,10 @@ local function createMode3Card()
 	uLabel.TextXAlignment = Enum.TextXAlignment.Left
 	uLabel.Parent = uFrame
 
-	-- Hold Shift - Runway Walk (FIXED TEXT & WIDTH)
+	-- Hold Shift - Runway Walk
 	local runwayFrame = Instance.new("Frame")
 	runwayFrame.Size = UDim2.new(1, 0, 0, 25)
-	runwayFrame.Position = UDim2.new(0, 0, 0, 120)
+	runwayFrame.Position = UDim2.new(0, 0, 0, 150)
 	runwayFrame.BackgroundTransparency = 1
 	runwayFrame.Parent = card
 
@@ -1097,7 +1141,7 @@ local function createMode3Card()
 	-- C - Back to Standard Camera
 	local cFrame = Instance.new("Frame")
 	cFrame.Size = UDim2.new(1, 0, 0, 25)
-	cFrame.Position = UDim2.new(0, 0, 0, 150)
+	cFrame.Position = UDim2.new(0, 0, 0, 180)
 	cFrame.BackgroundTransparency = 1
 	cFrame.Parent = card
 
@@ -1312,7 +1356,7 @@ end
 ----------------------------------------
 local function updateMode1(dt)
 	local cfg = CFG.MODE1
-	
+
 	-- Handle runway walk with Shift
 	if isRunwayWalk then
 		humanoid.WalkSpeed = cfg.runwayWalkSpeed
@@ -1371,7 +1415,19 @@ local function updateMode1(dt)
 	local distance = direction.Magnitude
 
 	if distance > 0.1 then
-		local result = Workspace:Raycast(headPos, direction, raycastParams)
+		-- Create filter list that includes all players' characters
+		local tempParams = RaycastParams.new()
+		tempParams.FilterType = Enum.RaycastFilterType.Exclude
+		local filterList = {char}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p.Character and p ~= player then
+				table.insert(filterList, p.Character)
+			end
+		end
+		tempParams.FilterDescendantsInstances = filterList
+		tempParams.IgnoreWater = true
+
+		local result = Workspace:Raycast(headPos, direction, tempParams)
 
 		if result then
 			if not shouldIgnoreForCollision(result.Instance) then
@@ -1405,17 +1461,27 @@ local function updateMode2(dt)
 	if isRunwayWalk then
 		-- Enable avatar walking at runway walk speed
 		humanoid.WalkSpeed = cfg.runwayWalkSpeed
-		
+
 		-- Also allow camera movement during runway walk (similar to Hold T)
 		if moveDir.Magnitude > 0 then
-			raycastParams.FilterDescendantsInstances = {char}
-			
+			-- Create filter list that includes all players' characters
+			local tempParams = RaycastParams.new()
+			tempParams.FilterType = Enum.RaycastFilterType.Exclude
+			local filterList = {char}
+			for _, p in ipairs(Players:GetPlayers()) do
+				if p.Character and p ~= player then
+					table.insert(filterList, p.Character)
+				end
+			end
+			tempParams.FilterDescendantsInstances = filterList
+			tempParams.IgnoreWater = true
+
 			-- Use slower camera speed for runway walk (speed: 6)
 			local currentSpeed = cfg.runwaySpeed or 6
 			local moveVector = freeRot:VectorToWorldSpace(moveDir.Unit) * currentSpeed * dt
 			local sphereRadius = cfg.CollisionSphereRadius
 
-			local result = Workspace:Spherecast(STATE.freePos, sphereRadius, moveVector, raycastParams)
+			local result = Workspace:Spherecast(STATE.freePos, sphereRadius, moveVector, tempParams)
 
 			if result then
 				if shouldIgnoreForCollision(result.Instance) then
@@ -1425,7 +1491,7 @@ local function updateMode2(dt)
 					local projection = moveVector:Dot(normal)
 					local slideVector = moveVector - normal * projection
 
-					local slideResult = Workspace:Spherecast(STATE.freePos, sphereRadius, slideVector, raycastParams)
+					local slideResult = Workspace:Spherecast(STATE.freePos, sphereRadius, slideVector, tempParams)
 
 					if slideResult and not shouldIgnoreForCollision(slideResult.Instance) then
 						moveVector = Vector3.zero
@@ -1466,14 +1532,24 @@ local function updateMode2(dt)
 
 	-- Only move camera if not in runway walk mode (already handled above)
 	if not isRunwayWalk and moveDir.Magnitude > 0 then
-		raycastParams.FilterDescendantsInstances = {char}
+		-- Create filter list that includes all players' characters
+		local tempParams = RaycastParams.new()
+		tempParams.FilterType = Enum.RaycastFilterType.Exclude
+		local filterList = {char}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p.Character and p ~= player then
+				table.insert(filterList, p.Character)
+			end
+		end
+		tempParams.FilterDescendantsInstances = filterList
+		tempParams.IgnoreWater = true
 
 		-- Use the dynamically calculated speed based on the flight speed slider
 		local currentSpeed = STATE.isRunning and cfg.runSpeed or cfg.speed
 		local moveVector = freeRot:VectorToWorldSpace(moveDir.Unit) * currentSpeed * dt
 		local sphereRadius = cfg.CollisionSphereRadius
 
-		local result = Workspace:Spherecast(STATE.freePos, sphereRadius, moveVector, raycastParams)
+		local result = Workspace:Spherecast(STATE.freePos, sphereRadius, moveVector, tempParams)
 
 		if result then
 			if shouldIgnoreForCollision(result.Instance) then
@@ -1483,7 +1559,7 @@ local function updateMode2(dt)
 				local projection = moveVector:Dot(normal)
 				local slideVector = moveVector - normal * projection
 
-				local slideResult = Workspace:Spherecast(STATE.freePos, sphereRadius, slideVector, raycastParams)
+				local slideResult = Workspace:Spherecast(STATE.freePos, sphereRadius, slideVector, tempParams)
 
 				if slideResult and not shouldIgnoreForCollision(slideResult.Instance) then
 					moveVector = Vector3.zero
@@ -1549,7 +1625,8 @@ local function updateMode3(dt)
 	local s1 = SHOTS[STATE.camIdx]
 	local s2 = SHOTS[((STATE.camIdx) % #SHOTS) + 1]
 
-	local d = s1.d + (s2.d - s1.d) * t
+	-- Apply zoom to distance
+	local d = (s1.d + (s2.d - s1.d) * t) * STATE.cinematicZoom
 	local h = s1.h + (s2.h - s1.h) * t
 	local v = s1.v + (s2.v - s1.v) * t
 	local fov = s1.fov + (s2.fov - s1.fov) * t
@@ -1647,42 +1724,17 @@ local function switchMode(_, state)
 	-- Hidden Icon -> Show Mode 1 UI -> Mode 2 -> Mode 3 -> Back to Hidden Icon
 
 	if STATE.cameraIconOnly then
-		-- If UI is hidden to icon, show Mode 1 UI
+		-- If UI is hidden to icon, show Mode 1 UI WITHOUT resetting camera
 		STATE.cameraIconOnly = false
 		STATE.cameraUIVisible = true
-		-- Stay in Mode 1
+		-- Stay in Mode 1, don't reset any camera settings
 	elseif STATE.mode == 1 then
 		-- Mode 1 with UI visible -> Mode 2
 		STATE.mode = 2
 		STATE.cameraUIVisible = true
 		STATE.cameraIconOnly = false
-	elseif STATE.mode == 2 then
-		-- Mode 2 -> Mode 3
-		STATE.mode = 3
-		STATE.cameraUIVisible = true
-		STATE.cameraIconOnly = false
-	elseif STATE.mode == 3 then
-		-- Mode 3 -> Back to Mode 1 with hidden UI (icon only)
-		STATE.mode = 1
-		STATE.cameraUIVisible = false
-		STATE.cameraIconOnly = true
-	end
 
-	local cfg = CFG["MODE" .. STATE.mode]
-
-	if STATE.mode == 1 then
-		STATE.zoom = CFG.MODE1.zoom.def
-		STATE.angX = 0
-		STATE.angY = 180
-		camera.FieldOfView = 70
-		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-		UserInputService.MouseIconEnabled = not STATE.uiHidden
-		STATE.previousCollisionDistance = math.huge
-		STATE.lastValidCameraPosition = nil
-		STATE.isRunning = false
-		-- Reset smoothed position to nil (let updateMode1 initialize it)
-		STATE.smoothedFacePosition = nil
-	elseif STATE.mode == 2 then
+		-- Initialize Mode 2 from current position
 		STATE.freePos = camera.CFrame.Position
 		local _, yaw, pitch = camera.CFrame:ToEulerAnglesYXZ()
 		STATE.freeYaw = deg(yaw)
@@ -1696,17 +1748,45 @@ local function switchMode(_, state)
 		STATE.isRunning = false
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		UserInputService.MouseIconEnabled = not STATE.uiHidden
-	else
+
+	elseif STATE.mode == 2 then
+		-- Mode 2 -> Mode 3
+		STATE.mode = 3
+		STATE.cameraUIVisible = true
+		STATE.cameraIconOnly = false
+
+		-- Initialize Mode 3
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		camera.FieldOfView = 70
 		UserInputService.MouseIconEnabled = not STATE.uiHidden
 		STATE.cinematicTarget = player
 		STATE.cinematicTargetIndex = 1
+		STATE.cinematicZoom = CFG.MODE3.zoom.def  -- Initialize zoom
 		STATE.isRunning = false
 		STATE.camIdx = math.random(1, #SHOTS)
 		STATE.lastT = tick()
+
+	elseif STATE.mode == 3 then
+		-- Mode 3 -> Back to Mode 1 with hidden UI (icon only)
+		STATE.mode = 1
+		STATE.cameraUIVisible = false
+		STATE.cameraIconOnly = true
+
+		-- Reset Mode 1 settings
+		STATE.zoom = CFG.MODE1.zoom.def
+		STATE.angX = 0
+		STATE.angY = 180
+		camera.FieldOfView = 70
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = not STATE.uiHidden
+		STATE.previousCollisionDistance = math.huge
+		STATE.lastValidCameraPosition = nil
+		STATE.isRunning = false
+		-- Reset smoothed position to nil (let updateMode1 initialize it)
+		STATE.smoothedFacePosition = nil
 	end
 
+	local cfg = CFG["MODE" .. STATE.mode]
 	updateUIVisibility()
 
 	if not STATE.cameraIconOnly then
@@ -1821,6 +1901,11 @@ local function wheel(input)
 		if math.abs(STATE.actualZoom - STATE.targetZoom) > 1 then
 			STATE.actualZoom = STATE.targetZoom
 		end
+	elseif STATE.mode == 3 then
+		-- Cinematic mode zoom
+		local cfg = CFG.MODE3
+		local z = STATE.cinematicZoom - input.Position.Z * cfg.wheelSens
+		STATE.cinematicZoom = clamp(z, cfg.zoom.min, cfg.zoom.max)
 	end
 
 	updateActivity()
@@ -1884,6 +1969,9 @@ local function start()
 	STATE.actualZoom = 1.0
 	STATE.zoomVelocity = 0
 	STATE.lastActivity = tick()
+
+	-- Initialize Mode 3 cinematic zoom
+	STATE.cinematicZoom = CFG.MODE3.zoom.def
 
 	-- Initialize flight speed based on current slider value (max by default)
 	local cfg = CFG.MODE2
