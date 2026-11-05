@@ -618,7 +618,7 @@ function UI.text(parent, str, o)
 		Name = o.name or "Text",
 		Text = str or "",
 		Font = o.font or T.font.body,
-		TextSize = o.size or 14,
+		TextSize = clamp(o.size or 14, 1, 100),
 		TextColor3 = o.color or T.text,
 		BackgroundTransparency = 1,
 		Size = o.frameSize or UDim2.new(1, 0, 0, o.height or 18),
@@ -3449,17 +3449,29 @@ local Spectate = { rigs = {}, phones = {}, folder = nil }
 
 function Spectate.onRig(model)
 	if Spectate.rigs[model] then return end
-	local ok, h = pcall(Tripod.decorate, model)
-	if not ok then warn("[ICS2K] rig decorate: " .. tostring(h)) return end
-	Spectate.rigs[model] = h
-	pcall(Tripod.animateIn, model)
-	Ray.dirty = true
+	Spectate.rigs[model] = { pending = true, maid = Maid.new() }
+	task.spawn(function()
+		-- a replicated model can arrive before all of its parts have; wait for the ones we decorate
+		model:WaitForChild("RingLight", 3)
+		model:WaitForChild("Screen", 3)
+		model:WaitForChild("Phone", 3)
+		if not model.Parent or not Spectate.rigs[model] then return end
+		local ok, h = pcall(Tripod.decorate, model)
+		if not ok then
+			warn("[ICS2K] rig decorate: " .. tostring(h))
+			Spectate.rigs[model] = nil
+			return
+		end
+		Spectate.rigs[model] = h
+		pcall(Tripod.animateIn, model)
+		Ray.dirty = true
+	end)
 end
 
 function Spectate.offRig(model)
 	local h = Spectate.rigs[model]
 	if not h then return end
-	h.maid:clean()
+	if h.maid then h.maid:clean() end
 	if h.anim then h.anim.alive = false end
 	Spectate.rigs[model] = nil
 end
@@ -3936,12 +3948,15 @@ defineMode({
 		local rig = Tik.rig
 		Tik.rig = nil
 		Tik.phase = "off"
-		if Tik.rigLocal then
-			if rig then Tripod.animateOut(rig, function() Spectate.offRig(rig) rig:Destroy() end) end
-		else
-			Net.sendRig("despawn")
+		if Tik.rigLocal and rig then
+			Tripod.animateOut(rig, function() Spectate.offRig(rig) rig:Destroy() end)
 		end
-		pcall(function() Rig.humanoid:Move(Vector3.new(), false) end)
+		if Net.available then Net.sendRig("despawn") end
+		pcall(function()
+			-- cancel a walk that is still in progress and stop any Move we issued
+			Rig.humanoid:MoveTo(Rig.root.Position)
+			Rig.humanoid:Move(Vector3.new(), false)
+		end)
 	end,
 	update = function(dt, t)
 		local e = Tik.els
