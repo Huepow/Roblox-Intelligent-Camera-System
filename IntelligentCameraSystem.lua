@@ -99,7 +99,7 @@ local S = {
 		uiScale = 1.0,
 	},
 	carousel = {
-		FREE = true, CINEMATIC = true, PAPARAZZI = true, BODYCAM = true,
+		FREE = true, CINEMATIC = true, PAPARAZZI = true, TIKTOK = true, BODYCAM = true,
 		DRONE = true, TACTICAL = true, CCTV = true,
 	},
 	free = {
@@ -132,6 +132,18 @@ local S = {
 		sensitivity = 1.0,
 		torch = 2.0,
 		shake = 0.5,
+		preset = "PORTRAIT",
+	},
+	tiktok = {
+		fov = 62,
+		markDistance = 7,
+		light = 2,
+		temp = "NEUTRAL",
+		centerStage = true,
+		autoZoom = false,
+		autoZoomStrength = 1.0,
+		clipFrames = 15,
+		hearts = true,
 		preset = "PORTRAIT",
 	},
 	bodycam = {
@@ -1513,7 +1525,12 @@ end
 -- Two-bone arm IK driven through joint Transform (stepped after the animator, before physics).
 -- Works with classic Motor6D rigs and with AnimationConstraint rigs (AvatarJointUpgrade):
 -- both satisfy Part1.CFrame = Part0.CFrame * C0 * Transform * C1:Inverse().
-local IK = { weight = 0, targetWeight = 0, rig = nil, handCF = nil, elbowRoll = rad(-35), wasActive = false }
+local ArmIK = {}
+ArmIK.__index = ArmIK
+
+function ArmIK.new()
+	return setmetatable({ weight = 0, targetWeight = 0, rig = nil, handCF = nil, elbowRoll = rad(-35), wasActive = false }, ArmIK)
+end
 
 local function findJoint(model, name)
 	for _, d in ipairs(model:GetDescendants()) do
@@ -1552,10 +1569,10 @@ local function solveTwoBone(originCF, targetPos, l1, l2)
 	return planeCF, a1 + math.pi / 2, a2 - a1
 end
 
-function IK.bind()
-	IK.rig = nil
-	local c = Rig.char
-	local hum = Rig.humanoid
+function ArmIK:bindTo(c, hum)
+	self.rig = nil
+	hum = hum or (c and c:FindFirstChildOfClass("Humanoid"))
+	if not c or not hum then return false end
 	if hum.RigType == Enum.HumanoidRigType.R15 then
 		local torso = c:FindFirstChild("UpperTorso")
 		local hand = c:FindFirstChild("RightHand")
@@ -1567,11 +1584,11 @@ function IK.bind()
 			local _, _, eC0, eC1 = jointFrames(elbow)
 			local _, _, wC0 = jointFrames(wrist)
 			if sC0 and eC0 and wC0 then
-				IK.rig = "R15"
-				IK.torso, IK.shoulder, IK.elbow, IK.wrist, IK.hand = torso, shoulder, elbow, wrist, hand
-				IK.l1 = (eC0.Position - sC1.Position).Magnitude
-				IK.l2 = (wC0.Position - eC1.Position).Magnitude
-				IK.reach = IK.l1 + IK.l2
+				self.rig = "R15"
+				self.torso, self.shoulder, self.elbow, self.wrist, self.hand = torso, shoulder, elbow, wrist, hand
+				self.l1 = (eC0.Position - sC1.Position).Magnitude
+				self.l2 = (wC0.Position - eC1.Position).Magnitude
+				self.reach = self.l1 + self.l2
 			end
 		end
 	else
@@ -1579,45 +1596,45 @@ function IK.bind()
 		local arm = c:FindFirstChild("Right Arm")
 		local shoulder = findJoint(c, "Right Shoulder")
 		if torso and arm and shoulder and jointFrames(shoulder) then
-			IK.rig = "R6"
-			IK.torso, IK.shoulder, IK.hand = torso, shoulder, arm
-			IK.reach = 2.0
+			self.rig = "R6"
+			self.torso, self.shoulder, self.hand = torso, shoulder, arm
+			self.reach = 2.0
 		end
 	end
-	return IK.rig ~= nil
+	return self.rig ~= nil
 end
 
-function IK.shoulderPos()
-	if not IK.rig then return Rig.root.Position end
-	local _, _, c0 = jointFrames(IK.shoulder)
-	return (IK.torso.CFrame * c0).Position
+function ArmIK:shoulderPosition(fallback)
+	if not self.rig then return fallback end
+	local _, _, c0 = jointFrames(self.shoulder)
+	return (self.torso.CFrame * c0).Position
 end
 
 -- Leave the joints to the animator again (rigs without playing animations would otherwise keep our pose).
-function IK.release()
-	if not IK.rig then return end
-	for _, j in ipairs({ IK.shoulder, IK.elbow, IK.wrist }) do
+function ArmIK:releaseJoints()
+	if not self.rig then return end
+	for _, j in ipairs({ self.shoulder, self.elbow, self.wrist }) do
 		if j and j.Parent then j.Transform = CFrame.identity end
 	end
 end
 
 -- handCF: desired world CFrame for the hand (R15) / arm end (R6).
-function IK.step()
-	if not IK.rig or not IK.handCF then return end
-	local w = IK.weight
+function ArmIK:stepJoints()
+	if not self.rig or not self.handCF then return end
+	local w = self.weight
 	if w <= 0.001 then return end
-	if not IK.torso.Parent then return end
-	local torsoCF = IK.torso.CFrame
-	if IK.rig == "R15" then
-		local shoulder, elbow, wrist = IK.shoulder, IK.elbow, IK.wrist
+	if not self.torso.Parent then return end
+	local torsoCF = self.torso.CFrame
+	if self.rig == "R15" then
+		local shoulder, elbow, wrist = self.shoulder, self.elbow, self.wrist
 		local _, _, sC0, sC1 = jointFrames(shoulder)
 		local _, _, eC0, eC1 = jointFrames(elbow)
 		local _, _, wC0, wC1 = jointFrames(wrist)
 		if not (sC0 and eC0 and wC0) then return end
-		local wristTarget = IK.handCF:PointToWorldSpace(wC1.Position)
+		local wristTarget = self.handCF:PointToWorldSpace(wC1.Position)
 		local originCF = torsoCF * sC0
-		local planeCF, a1, a2 = solveTwoBone(originCF, wristTarget, IK.l1, IK.l2)
-		planeCF = planeCF * CFrame.Angles(0, 0, IK.elbowRoll)
+		local planeCF, a1, a2 = solveTwoBone(originCF, wristTarget, self.l1, self.l2)
+		planeCF = planeCF * CFrame.Angles(0, 0, self.elbowRoll)
 		local desiredC0 = torsoCF:ToObjectSpace(planeCF) * CFrame.Angles(a1, 0, 0)
 		local shoulderT = sC0:Inverse() * desiredC0
 		local elbowT = CFrame.Angles(a2, 0, 0)
@@ -1625,20 +1642,20 @@ function IK.step()
 		elbow.Transform = elbow.Transform:Lerp(elbowT, w)
 		local upperCF = torsoCF * sC0 * shoulder.Transform * sC1:Inverse()
 		local lowerCF = upperCF * eC0 * elbow.Transform * eC1:Inverse()
-		local wristT = (lowerCF * wC0):Inverse() * IK.handCF * wC1
+		local wristT = (lowerCF * wC0):Inverse() * self.handCF * wC1
 		wrist.Transform = wrist.Transform:Lerp(wristT, w)
 	else
-		local shoulder = IK.shoulder
+		local shoulder = self.shoulder
 		local _, _, sC0, sC1 = jointFrames(shoulder)
 		if not sC0 then return end
 		local jointCF = torsoCF * sC0
 		local jointPos = jointCF.Position
-		local toTarget = IK.handCF.Position - jointPos
+		local toTarget = self.handCF.Position - jointPos
 		if toTarget.Magnitude < 0.05 then return end
-		local aim = CFrame.lookAt(jointPos, IK.handCF.Position)
+		local aim = CFrame.lookAt(jointPos, self.handCF.Position)
 		local aimRot = (aim * CFrame.Angles(math.pi / 2, 0, 0)).Rotation
 		-- roll about the arm axis so the arm's front matches the hand's front as well as it can
-		local wantFront = IK.handCF.LookVector
+		local wantFront = self.handCF.LookVector
 		local localFront = aimRot:VectorToObjectSpace(wantFront)
 		local roll = math.atan2(-localFront.X, -localFront.Z)
 		local armRot = aimRot * CFrame.Angles(0, roll, 0)
@@ -1648,18 +1665,26 @@ function IK.step()
 	end
 end
 
-function IK.tick(dt)
-	IK.weight = Util.smooth(IK.weight, IK.targetWeight, 6, dt)
-	if IK.weight < 0.002 then
-		IK.weight = 0
-		if IK.wasActive then
-			IK.wasActive = false
-			pcall(IK.release)
+function ArmIK:tickWeight(dt)
+	self.weight = Util.smooth(self.weight, self.targetWeight, 6, dt)
+	if self.weight < 0.002 then
+		self.weight = 0
+		if self.wasActive then
+			self.wasActive = false
+			pcall(self.releaseJoints, self)
 		end
 	else
-		IK.wasActive = true
+		self.wasActive = true
 	end
 end
+
+-- The local player's arm. Dot-style wrappers keep the call sites short.
+local IK = ArmIK.new()
+function IK.bind() return IK:bindTo(Rig.char, Rig.humanoid) end
+function IK.step() IK:stepJoints() end
+function IK.tick(dt) IK:tickWeight(dt) end
+function IK.release() IK:releaseJoints() end
+function IK.shoulderPos() return IK:shoulderPosition(Rig.root.Position) end
 
 ----------------------------------------------------------------------------
 -- 10. CAPTURE + GALLERY
@@ -1674,7 +1699,15 @@ function Gallery.notify()
 end
 
 function Gallery.add(contentId, label)
-	local item = { id = contentId, label = label or "CAPTURE", time = os.time(), clock = Util.clock24() }
+	local item = { id = contentId, frames = { contentId }, label = label or "CAPTURE", time = os.time(), clock = Util.clock24() }
+	table.insert(Gallery.items, 1, item)
+	Gallery.notify()
+	return item
+end
+
+-- A clip is a burst of frames saved together (one save prompt for all of them).
+function Gallery.addClip(ids, label)
+	local item = { id = ids[1], frames = ids, clip = true, label = label or "CLIP", time = os.time(), clock = Util.clock24() }
 	table.insert(Gallery.items, 1, item)
 	Gallery.notify()
 	return item
@@ -1702,6 +1735,10 @@ function Gallery.capture(opts)
 		RunService.RenderStepped:Wait()
 		local ok, err = pcall(function()
 			CaptureService:CaptureScreenshot(function(contentId)
+				if opts.raw then
+					if opts.onDone then opts.onDone(contentId) end
+					return
+				end
 				local item = Gallery.add(contentId, opts.label)
 				if opts.onDone then opts.onDone(item) end
 			end)
@@ -1721,14 +1758,20 @@ function Gallery.remove(item)
 	for i, it in ipairs(Gallery.items) do
 		if it == item then table.remove(Gallery.items, i) break end
 	end
-	pcall(function() if CaptureService then CaptureService:DeleteCapture(item.id) end end)
+	pcall(function()
+		if CaptureService then
+			for _, id in ipairs(item.frames or { item.id }) do CaptureService:DeleteCapture(id) end
+		end
+	end)
 	Gallery.notify()
 end
 
 function Gallery.save(items)
 	if not CaptureService then Toast.show("saving needs the live Roblox client", "error") return end
 	local ids = {}
-	for _, it in ipairs(items) do table.insert(ids, it.id) end
+	for _, it in ipairs(items) do
+		for _, id in ipairs(it.frames or { it.id }) do table.insert(ids, id) end
+	end
 	if #ids == 0 then return end
 	local ok, err = pcall(function()
 		CaptureService:PromptSaveCapturesToGallery(ids, function(results)
@@ -1777,7 +1820,23 @@ function Gallery.init()
 	local row = new("Frame", { Size = UDim2.new(1, -24, 0, 36), Position = UDim2.new(0, 12, 1, -48), BackgroundTransparency = 1, Parent = card })
 	UI.list(row, 8, true, Enum.HorizontalAlignment.Right)
 	local current
+	local frameIdx = 1
 	local function close() gui.Enabled = false end
+	-- clip navigation
+	local nav = new("Frame", { Size = UDim2.new(0, 170, 0, 26), Position = UDim2.new(0.5, -85, 1, -78), BackgroundTransparency = 1, Visible = false, Parent = card })
+	UI.list(nav, 6, true, Enum.HorizontalAlignment.Center)
+	local frameLbl
+	local function showFrame()
+		if not current then return end
+		local frames = current.frames or { current.id }
+		frameIdx = ((frameIdx - 1) % #frames) + 1
+		img.Image = frames[frameIdx]
+		nav.Visible = #frames > 1
+		if frameLbl then frameLbl.Text = string.format("%d / %d", frameIdx, #frames) end
+	end
+	UI.button(nav, { text = "‹", kind = "dark", size = UDim2.new(0, 34, 0, 26), order = 1, textSize = 14, onClick = function() frameIdx = frameIdx - 1 showFrame() end })
+	frameLbl = UI.text(nav, "", { font = T.font.mono, size = 12, color = T.text, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(0, 70, 0, 26), order = 2 })
+	UI.button(nav, { text = "›", kind = "dark", size = UDim2.new(0, 34, 0, 26), order = 3, textSize = 14, onClick = function() frameIdx = frameIdx + 1 showFrame() end })
 	UI.button(row, { text = "CLOSE", kind = "ghost", size = UDim2.new(0, 90, 0, 32), order = 4, onClick = close })
 	UI.button(row, { text = "DELETE", kind = "danger", size = UDim2.new(0, 96, 0, 32), order = 3, onClick = function()
 		if current then Gallery.remove(current) Toast.show("photo deleted", "info") end
@@ -1792,12 +1851,49 @@ function Gallery.init()
 	backdrop.MouseButton1Click:Connect(close)
 	function Gallery.open(item)
 		current = item
-		img.Image = item.id
-		caption.Text = item.label .. "  ✦  " .. item.clock
+		frameIdx = 1
+		local n = item.frames and #item.frames or 1
+		caption.Text = item.label .. "  ✦  " .. item.clock .. (n > 1 and ("  ✦  " .. n .. " FRAMES") or "")
+		showFrame()
 		gui.Enabled = true
 	end
 	function Gallery.isOpen() return gui.Enabled end
 	function Gallery.close() close() end
+end
+
+----------------------------------------------------------------------------
+-- 10b. NET  (optional replication through ICS2K_Server.lua; silently off without it)
+----------------------------------------------------------------------------
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Net = { folder = nil, rig = nil, pose = nil, available = false, lastPose = 0, onPose = nil }
+
+function Net.init()
+	task.spawn(function()
+		local folder = ReplicatedStorage:FindFirstChild("ICS2K") or ReplicatedStorage:WaitForChild("ICS2K", 6)
+		if not folder then return end
+		Net.folder = folder
+		Net.rig = folder:FindFirstChild("Rig")
+		Net.pose = folder:FindFirstChild("Pose")
+		Net.available = Net.rig ~= nil and Net.pose ~= nil
+		if Net.pose then
+			Net.pose.OnClientEvent:Connect(function(...)
+				if Net.onPose then pcall(Net.onPose, ...) end
+			end)
+		end
+	end)
+end
+
+function Net.sendRig(action, data)
+	if not Net.rig then return end
+	pcall(function() Net.rig:FireServer(action, data) end)
+end
+
+-- 20 Hz phone pose stream for PAPARAZZI (so others see the raised phone). force = send now.
+function Net.sendPose(rel, weight, torch, now, force)
+	if not Net.pose then return end
+	if not force and now - Net.lastPose < 1 / 20 then return end
+	Net.lastPose = now
+	pcall(function() Net.pose:FireServer(rel, weight, torch) end)
 end
 
 ----------------------------------------------------------------------------
@@ -2557,8 +2653,9 @@ CFG.phoneGrip = CFrame.fromMatrix(Vector3.new(-0.2, -0.05, 0.02), Vector3.new(0,
 
 -- Lockscreen builder used both on the 3D phone (SurfaceGui) and the full screen overlay.
 -- w/h are pixel sizes of the phone face. Returns a table with the live labels.
-local function buildLockscreen(parent, w, h, zBase)
+local function buildLockscreen(parent, w, h, zBase, userId)
 	zBase = zBase or 1
+	userId = userId or player.UserId
 	local bg = new("Frame", {
 		Name = "Lockscreen", Size = UDim2.new(0, w, 0, h), BackgroundColor3 = Color3.fromRGB(190, 176, 198),
 		BorderSizePixel = 0, ClipsDescendants = true, ZIndex = zBase, Parent = parent,
@@ -2581,7 +2678,7 @@ local function buildLockscreen(parent, w, h, zBase)
 	local imgSize = (h * 0.66) / 0.55
 	local avatar = new("ImageLabel", {
 		Name = "Body", Size = UDim2.new(0, imgSize, 0, imgSize), Position = UDim2.new(0.5, -imgSize / 2, 0, -imgSize * 0.04),
-		BackgroundTransparency = 1, Image = "rbxthumb://type=Avatar&id=" .. player.UserId .. "&w=720&h=720",
+		BackgroundTransparency = 1, Image = "rbxthumb://type=Avatar&id=" .. userId .. "&w=720&h=720",
 		ScaleType = Enum.ScaleType.Fit, ZIndex = zBase + 2, Parent = avatarHolder,
 	})
 	-- soft floor fade under the avatar
@@ -2621,12 +2718,14 @@ local function buildLockscreen(parent, w, h, zBase)
 	return api
 end
 
-function Phone.build()
-	Phone.destroy()
+-- Build a phone for any character's hand (nil hand = anchored, positioned by the caller).
+-- Returns a handle { model, parts, spot, point, lockGui, lock, weld, setTorch, setVisible, flashBurst, destroy }.
+function Phone.create(handPart, rigType, userId, parent)
+	local h = { torch = false, parts = {} }
 	local body = new("Part", {
 		Name = "ICS2K_Phone", Size = Vector3.new(0.74, 1.52, 0.07), Color = Color3.fromRGB(26, 26, 32),
 		Material = Enum.Material.SmoothPlastic, Anchored = false, CanCollide = false, CanQuery = false, CanTouch = false,
-		Massless = true, CastShadow = false, Parent = localFolder(),
+		Massless = true, CastShadow = false, Parent = parent or localFolder(),
 	})
 	local screen = new("Part", {
 		Name = "Screen", Size = Vector3.new(0.68, 1.44, 0.012), Color = T.black, Material = Enum.Material.SmoothPlastic,
@@ -2649,51 +2748,78 @@ function Phone.build()
 		Name = "LockGui", Face = Enum.NormalId.Front, LightInfluence = 0, Brightness = 1.6, PixelsPerStud = 400,
 		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud, AlwaysOnTop = false, Parent = screen,
 	})
-	Phone.lockGui = gui
-	Phone.lock = buildLockscreen(gui, 272, 576, 1)
-	Phone.spot = new("SpotLight", { Face = Enum.NormalId.Front, Angle = 75, Range = 9, Brightness = 0, Color = Color3.fromRGB(255, 244, 228), Shadows = false, Parent = screen })
-	Phone.point = new("PointLight", { Range = 7, Brightness = 0, Color = Color3.fromRGB(255, 248, 235), Shadows = false, Parent = body })
-	Phone.model = body
-	Phone.parts = { body, screen, lens }
-	for _, c in ipairs(body:GetChildren()) do if c:IsA("BasePart") then table.insert(Phone.parts, c) end end
-	-- attach to the hand
-	if IK.rig and IK.hand then
-		Phone.weld = new("Weld", { Part0 = IK.hand, Part1 = body, C0 = CFG.phoneGrip, Parent = body })
-		if IK.rig == "R6" then Phone.weld.C0 = CFrame.new(0, -1.05, 0) * CFrame.Angles(rad(-90), 0, 0) * CFrame.Angles(0, rad(180), 0) end
+	h.lockGui = gui
+	h.lock = buildLockscreen(gui, 272, 576, 1, userId)
+	h.spot = new("SpotLight", { Face = Enum.NormalId.Front, Angle = 75, Range = 9, Brightness = 0, Color = Color3.fromRGB(255, 244, 228), Shadows = false, Parent = screen })
+	h.point = new("PointLight", { Range = 7, Brightness = 0, Color = Color3.fromRGB(255, 248, 235), Shadows = false, Parent = body })
+	h.model = body
+	h.parts = { body, screen, lens }
+	for _, c in ipairs(body:GetChildren()) do if c:IsA("BasePart") then table.insert(h.parts, c) end end
+	if handPart then
+		h.weld = new("Weld", { Part0 = handPart, Part1 = body, C0 = CFG.phoneGrip, Parent = body })
+		if rigType == "R6" then h.weld.C0 = CFrame.new(0, -1.05, 0) * CFrame.Angles(rad(-90), 0, 0) * CFrame.Angles(0, rad(180), 0) end
 	else
 		body.Anchored = true
 	end
+	function h.setTorch(on, brightness)
+		h.torch = on and true or false
+		if h.spot then h.spot.Brightness = h.torch and (brightness or 2) or 0 end
+	end
+	function h.setVisible(v)
+		for _, p in ipairs(h.parts) do p.LocalTransparencyModifier = v and 0 or 1 end
+		if h.lockGui then h.lockGui.Enabled = v and true or false end
+	end
+	function h.flashBurst()
+		if not h.point then return end
+		h.point.Brightness = 12
+		if h.spot then h.spot.Brightness = 10 end
+		task.delay(0.22, function()
+			if h.point then h.point.Brightness = 0 end
+			h.setTorch(h.torch, S.paparazzi.torch)
+		end)
+	end
+	function h.destroy()
+		if h.model then h.model:Destroy() end
+		h.model = nil
+		h.parts = {}
+	end
+	return h
+end
+
+-- The local player's phone (PAPARAZZI mode)
+function Phone.build()
+	Phone.destroy()
+	local h = Phone.create(IK.rig and IK.hand or nil, IK.rig, player.UserId, localFolder())
+	Phone.handle = h
+	Phone.model, Phone.parts, Phone.weld = h.model, h.parts, h.weld
+	Phone.lock, Phone.lockGui, Phone.spot, Phone.point = h.lock, h.lockGui, h.spot, h.point
 	Phone.setTorch(Phone.torch)
-	return body
+	return h.model
 end
 
 function Phone.destroy()
-	if Phone.model then Phone.model:Destroy() end
+	if Phone.handle then Phone.handle.destroy() end
+	Phone.handle = nil
 	Phone.model = nil
 	Phone.parts = {}
 	Phone.weld = nil
 	Phone.lock = nil
 	Phone.lockGui = nil
+	Phone.spot = nil
+	Phone.point = nil
 end
 
 function Phone.setVisible(v)
-	for _, p in ipairs(Phone.parts) do p.LocalTransparencyModifier = v and 0 or 1 end
-	if Phone.lockGui then Phone.lockGui.Enabled = v and true or false end
+	if Phone.handle then Phone.handle.setVisible(v) end
 end
 
 function Phone.setTorch(on)
 	Phone.torch = on and true or false
-	if Phone.spot then Phone.spot.Brightness = Phone.torch and S.paparazzi.torch or 0 end
+	if Phone.handle then Phone.handle.setTorch(Phone.torch, S.paparazzi.torch) end
 end
 
 function Phone.flashBurst()
-	if not Phone.point then return end
-	Phone.point.Brightness = 12
-	if Phone.spot then Phone.spot.Brightness = 10 end
-	task.delay(0.22, function()
-		if Phone.point then Phone.point.Brightness = 0 end
-		Phone.setTorch(Phone.torch)
-	end)
+	if Phone.handle then Phone.handle.flashBurst() end
 end
 
 ----------------------------------------------------------------------------
@@ -2995,6 +3121,7 @@ defineMode({
 		Pap.phase = "off"
 		if Pap.maskGui then Pap.maskGui.Enabled = false end
 		if Pap.chromeGui then Pap.chromeGui.Enabled = false end
+		Net.sendPose(CFrame.identity, 0, false, 0, true)
 		task.delay(0.7, function() if Pap.phase == "off" then Phone.destroy() end end)
 	end,
 	update = function(dt, t)
@@ -3006,6 +3133,7 @@ defineMode({
 		local phoneCF, facePos = Pap.desiredPhoneCF(dt)
 		IK.handCF = phoneCF * CFG.phoneGrip:Inverse()
 		if Phone.model and Phone.model.Anchored then Phone.model.CFrame = phoneCF end
+		Net.sendPose(Rig.root.CFrame:ToObjectSpace(phoneCF), IK.weight, Phone.torch, t)
 		if Phone.lock and math.floor(t) ~= math.floor(t - dt) then Phone.lock.tick() end
 
 		-- zoom spring
@@ -3138,6 +3266,874 @@ defineMode({
 			if active then c.label.Text = string.format("%.1fx", Pap.zoomT):gsub("%.0x", "x") else c.label.Text = (c.z < 1 and ".5" or tostring(c.z)) end
 		end
 		e.levelLbl.Text = string.format("%s  %.0f°", Pap.front and "f/1.9" or "f/1.6", Pap.fov())
+	end,
+})
+
+----------------------------------------------------------------------------
+-- 17b. TRIPOD + SPECTATE  (the ring light rig everybody can see, remote phones)
+----------------------------------------------------------------------------
+local Tripod = {
+	lightLevels = { [0] = 0, 1.2, 2.6, 4.5, 7.5 },
+	temps = { WARM = Color3.fromRGB(255, 214, 170), NEUTRAL = Color3.fromRGB(255, 244, 228), COOL = Color3.fromRGB(214, 232, 255) },
+	phoneOffset = CFrame.new(0, 4.45, 0.15),
+	markOffset = Vector3.new(0, 0, -3.6),
+}
+
+-- Geometry. Mirrored in ICS2K_Server.lua (keep both in sync). rootCF sits on the floor looking at the performer.
+function Tripod.buildModel(rootCF, parent, ownerId)
+	local m = new("Model", { Name = "ICS2K_Rig" })
+	local function part(name, size, cf, color, material, shape)
+		return new("Part", {
+			Name = name, Size = size, CFrame = rootCF * cf, Color = color, Material = material or Enum.Material.Metal,
+			Shape = shape or Enum.PartType.Block, Anchored = true, CanCollide = false, CanQuery = false, CanTouch = false,
+			CastShadow = true, Parent = m,
+		})
+	end
+	local dark = Color3.fromRGB(28, 28, 32)
+	local titanium = Color3.fromRGB(168, 166, 158)
+	local hub = part("Hub", Vector3.new(0.3, 0.5, 0.5), CFrame.new(0, 0.9, 0) * CFrame.Angles(0, 0, rad(90)), dark, nil, Enum.PartType.Cylinder)
+	for i = 1, 3 do
+		local a = rad(90 + (i - 1) * 120)
+		local foot = Vector3.new(math.cos(a) * 1.15, 0.06, math.sin(a) * 1.15)
+		local top = Vector3.new(0, 0.85, 0)
+		part("Leg" .. i, Vector3.new(0.1, 0.1, (foot - top).Magnitude), CFrame.lookAt((foot + top) / 2, foot), dark)
+		part("Foot" .. i, Vector3.new(0.18, 0.1, 0.18), CFrame.new(foot), Color3.fromRGB(60, 60, 66), Enum.Material.Rubber)
+	end
+	part("Column", Vector3.new(0.12, 3.5, 0.12), CFrame.new(0, 2.6, 0), dark)
+	part("Mount", Vector3.new(0.34, 0.3, 0.3), CFrame.new(0, 4.3, 0.06), dark)
+	local phoneCF = Tripod.phoneOffset
+	part("JawTop", Vector3.new(0.95, 0.12, 0.22), phoneCF * CFrame.new(0, 0.92, 0.02), dark)
+	part("JawBottom", Vector3.new(0.95, 0.12, 0.22), phoneCF * CFrame.new(0, -0.92, 0.02), dark)
+	part("Phone", Vector3.new(0.82, 1.72, 0.075), phoneCF, titanium)
+	part("Screen", Vector3.new(0.76, 1.64, 0.012), phoneCF * CFrame.new(0, 0, -0.042), Color3.fromRGB(4, 4, 7), Enum.Material.SmoothPlastic)
+	part("Plateau", Vector3.new(0.36, 0.36, 0.03), phoneCF * CFrame.new(-0.2, 0.64, 0.05), Color3.fromRGB(150, 148, 140))
+	for i, off in ipairs({ Vector3.new(-0.29, 0.73, 0.065), Vector3.new(-0.29, 0.55, 0.065), Vector3.new(-0.11, 0.64, 0.065) }) do
+		part("Lens" .. i, Vector3.new(0.035, 0.14, 0.14), phoneCF * CFrame.new(off) * CFrame.Angles(0, rad(90), 0), Color3.fromRGB(10, 10, 14), Enum.Material.Glass, Enum.PartType.Cylinder)
+	end
+	part("RingArm", Vector3.new(0.08, 1.0, 0.08), CFrame.new(0, 5.35, 0.1), dark)
+	local ringCF = CFrame.new(0, 5.85, 0.1) * CFrame.Angles(rad(-12), 0, 0)
+	part("RingBack", Vector3.new(0.08, 2.3, 2.3), ringCF * CFrame.new(0, 0, 0.06) * CFrame.Angles(0, rad(90), 0), dark, nil, Enum.PartType.Cylinder)
+	part("RingLight", Vector3.new(0.05, 2.2, 2.2), ringCF * CFrame.Angles(0, rad(90), 0), Tripod.temps.NEUTRAL, Enum.Material.Neon, Enum.PartType.Cylinder)
+	part("RingCenter", Vector3.new(0.07, 1.3, 1.3), ringCF * CFrame.new(0, 0, -0.012) * CFrame.Angles(0, rad(90), 0), dark, Enum.Material.SmoothPlastic, Enum.PartType.Cylinder)
+	for i = 1, 16 do
+		local a = rad((i - 1) * 22.5)
+		local p = Tripod.markOffset + Vector3.new(math.cos(a) * 1.25, 0.03, math.sin(a) * 1.25)
+		part("Mark" .. i, Vector3.new(0.5, 0.04, 0.2), CFrame.new(p) * CFrame.Angles(0, -(a + math.pi / 2), 0), Color3.fromRGB(0, 229, 255), Enum.Material.Neon)
+	end
+	m.PrimaryPart = hub
+	m:SetAttribute("Owner", ownerId)
+	m:SetAttribute("Light", 2)
+	m:SetAttribute("Temp", "NEUTRAL")
+	m:SetAttribute("Rec", false)
+	m.Parent = parent
+	return m
+end
+
+-- The phone screen bystanders see: LIVE badge, viewers, hearts, REC timer.
+function Tripod.liveScreen(gui, h)
+	local w, hgt = 274, 590
+	local bg = new("Frame", { Size = UDim2.new(0, w, 0, hgt), BackgroundColor3 = Color3.fromRGB(8, 8, 12), BorderSizePixel = 0, ClipsDescendants = true, Parent = gui })
+	UI.gradient(bg, ColorSequence.new(Color3.fromRGB(22, 16, 36), Color3.fromRGB(6, 6, 10)), 90)
+	local owner = h.owner and Players:GetPlayerByUserId(h.owner)
+	UI.text(bg, owner and ("@" .. owner.Name) or "@live", { font = T.font.uiBold, size = 16, color = T.white, frameSize = UDim2.new(1, -20, 0, 24), pos = UDim2.new(0, 12, 0, 40), z = 2 })
+	local live = new("Frame", { Size = UDim2.new(0, 52, 0, 20), Position = UDim2.new(1, -64, 0, 42), BackgroundColor3 = Color3.fromRGB(254, 44, 85), BorderSizePixel = 0, ZIndex = 2, Parent = bg })
+	UI.corner(live, 5)
+	UI.text(live, "LIVE", { font = T.font.uiBold, size = 12, color = T.white, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 1, 0), z = 3 })
+	local viewers = UI.text(bg, "", { font = T.font.ui, size = 13, color = T.white, frameSize = UDim2.new(1, -20, 0, 20), pos = UDim2.new(0, 12, 0, 66), z = 2 })
+	local rec = UI.text(bg, "", { font = T.font.mono, size = 15, color = Color3.fromRGB(254, 44, 85), frameSize = UDim2.new(1, -20, 0, 22), pos = UDim2.new(0, 12, 0, 92), z = 2 })
+	UI.text(bg, "♪ ICS2K · original sound", { font = T.font.ui, size = 12, color = T.white, frameSize = UDim2.new(1, -20, 0, 18), pos = UDim2.new(0, 12, 1, -40), transparency = 0.2, z = 2 })
+	local count = rng:NextInteger(40, 320)
+	local heartClock = 0
+	h.anim = UI.animate(function(t, dt)
+		if not bg.Parent then return error("dead") end
+		if rng:NextNumber() < 0.08 then count = math.max(1, count + rng:NextInteger(-2, 5)) end
+		viewers.Text = "👁 " .. count
+		if h.recStart then
+			local blink = math.floor(t * 2) % 2 == 0
+			rec.Text = (blink and "● " or "   ") .. "REC " .. Util.fmtTime(os.clock() - h.recStart)
+		else
+			rec.Text = ""
+		end
+		heartClock = heartClock - dt
+		if heartClock <= 0 and S.tiktok.hearts then
+			heartClock = rng:NextNumber(0.5, 1.4)
+			local colors = { T.magenta, T.danger, T.lavender, T.white }
+			local heart = UI.text(bg, "❤", { font = T.font.ui, size = rng:NextInteger(16, 26), color = colors[rng:NextInteger(1, 4)], frameSize = UDim2.new(0, 30, 0, 30), pos = UDim2.new(0.78 + rng:NextNumber(-0.08, 0.08), 0, 0.86, 0), xalign = Enum.TextXAlignment.Center, z = 3 })
+			tween(heart, { Position = UDim2.new(0.78 + rng:NextNumber(-0.15, 0.15), 0, 0.35, 0), TextTransparency = 1 }, rng:NextNumber(1.6, 2.6))
+			task.delay(2.7, function() heart:Destroy() end)
+		end
+	end)
+	return { frame = bg }
+end
+
+-- Lights, screen UI and attribute listeners for any rig model (server-owned or local).
+function Tripod.decorate(model)
+	local maid = Maid.new()
+	local h = { model = model, maid = maid, owner = model:GetAttribute("Owner"), recStart = nil }
+	local ring = model:FindFirstChild("RingLight")
+	local screen = model:FindFirstChild("Screen")
+	if ring then
+		h.spot = maid:give(new("SpotLight", { Face = Enum.NormalId.Right, Angle = 95, Range = 18, Brightness = 2.6, Color = Tripod.temps.NEUTRAL, Shadows = true, Parent = ring }))
+		h.point = maid:give(new("PointLight", { Range = 9, Brightness = 0.8, Color = Tripod.temps.NEUTRAL, Shadows = false, Parent = ring }))
+	end
+	if screen then
+		local gui = maid:give(new("SurfaceGui", { Name = "LiveGui", Face = Enum.NormalId.Front, LightInfluence = 0, Brightness = 1.4, PixelsPerStud = 360, SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud, Parent = screen }))
+		h.live = Tripod.liveScreen(gui, h)
+	end
+	local function applyLight()
+		local level = clamp(math.floor((tonumber(model:GetAttribute("Light")) or 2) + 0.5), 0, 4)
+		local temp = Tripod.temps[model:GetAttribute("Temp")] or Tripod.temps.NEUTRAL
+		local b = Tripod.lightLevels[level] or 0
+		if h.spot then
+			h.spot.Brightness = b
+			h.spot.Color = temp
+			h.point.Brightness = b * 0.3
+			h.point.Color = temp
+		end
+		if ring then
+			ring.Color = temp
+			ring.Material = level > 0 and Enum.Material.Neon or Enum.Material.SmoothPlastic
+		end
+		h.level = level
+	end
+	local function applyRec()
+		h.recStart = model:GetAttribute("Rec") and os.clock() or nil
+	end
+	maid:give(model:GetAttributeChangedSignal("Light"):Connect(applyLight))
+	maid:give(model:GetAttributeChangedSignal("Temp"):Connect(applyLight))
+	maid:give(model:GetAttributeChangedSignal("Rec"):Connect(applyRec))
+	applyLight()
+	applyRec()
+	return h
+end
+
+-- Assembly: everything rises out of the hub with a bounce, then the ring flickers on.
+function Tripod.animateIn(model)
+	local parts = {}
+	for _, p in ipairs(model:GetChildren()) do if p:IsA("BasePart") then table.insert(parts, p) end end
+	local hub = model.PrimaryPart or parts[1]
+	if not hub then return end
+	local base = hub.CFrame
+	for _, p in ipairs(parts) do
+		local final = p.CFrame
+		local finalT = p.Transparency
+		p.Transparency = 1
+		p.CFrame = CFrame.new(base.Position + Vector3.new(0, -0.6, 0)) * final.Rotation
+		local wait = 0.05 + math.max(0, final.Position.Y - base.Position.Y) * 0.09 + rng:NextNumber(0, 0.06)
+		task.delay(wait, function()
+			if not p.Parent then return end
+			tween(p, { CFrame = final, Transparency = finalT }, 0.55, Enum.EasingStyle.Back)
+		end)
+	end
+	task.delay(0.95, function()
+		local ring = model:FindFirstChild("RingLight")
+		local spot = ring and ring:FindFirstChildOfClass("SpotLight")
+		if not spot then return end
+		local target = spot.Brightness
+		for i = 1, 4 do
+			spot.Brightness = (i % 2 == 0) and target or 0
+			task.wait(0.07)
+		end
+		spot.Brightness = target
+	end)
+end
+
+function Tripod.animateOut(model, onDone)
+	for _, p in ipairs(model:GetChildren()) do
+		if p:IsA("BasePart") then tween(p, { Transparency = 1 }, 0.3) end
+	end
+	task.delay(0.32, function() if onDone then onDone() end end)
+end
+
+local Spectate = { rigs = {}, phones = {}, folder = nil }
+
+function Spectate.onRig(model)
+	if Spectate.rigs[model] then return end
+	local ok, h = pcall(Tripod.decorate, model)
+	if not ok then warn("[ICS2K] rig decorate: " .. tostring(h)) return end
+	Spectate.rigs[model] = h
+	pcall(Tripod.animateIn, model)
+	Ray.dirty = true
+end
+
+function Spectate.offRig(model)
+	local h = Spectate.rigs[model]
+	if not h then return end
+	h.maid:clean()
+	if h.anim then h.anim.alive = false end
+	Spectate.rigs[model] = nil
+end
+
+function Spectate.watch(folder)
+	Spectate.folder = folder
+	for _, m in ipairs(folder:GetChildren()) do if m:IsA("Model") then Spectate.onRig(m) end end
+	folder.ChildAdded:Connect(function(m)
+		if m:IsA("Model") then task.defer(function() Spectate.onRig(m) end) end
+	end)
+	folder.ChildRemoved:Connect(function(m) Spectate.offRig(m) end)
+end
+
+function Spectate.findOwnRig()
+	if not Spectate.folder then return nil end
+	for _, m in ipairs(Spectate.folder:GetChildren()) do
+		if m:GetAttribute("Owner") == player.UserId then return m end
+	end
+	return nil
+end
+
+function Spectate.dropPhone(p)
+	local e = Spectate.phones[p]
+	if not e then return end
+	pcall(function() e.ik:releaseJoints() end)
+	e.phone.destroy()
+	Spectate.phones[p] = nil
+end
+
+function Spectate.init()
+	local f = Workspace:FindFirstChild("ICS2K_Rigs")
+	if f then
+		Spectate.watch(f)
+	else
+		Workspace.ChildAdded:Connect(function(c)
+			if c.Name == "ICS2K_Rigs" and not Spectate.folder then Spectate.watch(c) end
+		end)
+	end
+	-- somebody else pulled out their phone: pose their arm and give them a phone, locally
+	Net.onPose = function(p, rel, w, torch)
+		if p == player or typeof(rel) ~= "CFrame" then return end
+		local c = p.Character
+		if not c then return end
+		local entry = Spectate.phones[p]
+		if not entry or entry.char ~= c then
+			if entry then Spectate.dropPhone(p) end
+			local ik = ArmIK.new()
+			ik:bindTo(c, c:FindFirstChildOfClass("Humanoid"))
+			local phone = Phone.create(ik.rig and ik.hand or nil, ik.rig, p.UserId, localFolder())
+			entry = { char = c, ik = ik, phone = phone, rel = rel, lastSeen = os.clock(), created = os.clock() }
+			Spectate.phones[p] = entry
+		end
+		entry.rel = rel
+		entry.ik.targetWeight = clamp(tonumber(w) or 0, 0, 1)
+		entry.lastSeen = os.clock()
+		entry.phone.setTorch(torch and true or false, 2)
+	end
+	Players.PlayerRemoving:Connect(function(p) Spectate.dropPhone(p) end)
+end
+
+function Spectate.tick(dt)
+	local now = os.clock()
+	for p, e in pairs(Spectate.phones) do
+		local root = e.char and e.char:FindFirstChild("HumanoidRootPart")
+		local stale = now - e.lastSeen > 3
+		local lowered = e.ik.targetWeight <= 0 and e.ik.weight <= 0.01 and now - e.created > 1
+		if not root or not e.char.Parent or stale or lowered then
+			Spectate.dropPhone(p)
+		else
+			e.ik.handCF = root.CFrame * e.rel * CFG.phoneGrip:Inverse()
+			e.ik:tickWeight(dt)
+			if e.phone.model and e.phone.model.Anchored then e.phone.model.CFrame = root.CFrame * e.rel end
+		end
+	end
+end
+
+function Spectate.step()
+	for _, e in pairs(Spectate.phones) do
+		if e.ik.weight > 0 then pcall(function() e.ik:stepJoints() end) end
+	end
+end
+
+----------------------------------------------------------------------------
+-- 17c. MODE: TIKTOK  (ring light tripod, auto walk to the mark, phone POV, emotes, clips)
+----------------------------------------------------------------------------
+local Tik = {
+	phase = "off", phaseT = 0, rig = nil, rigLocal = false, rigCF = nil, mark = nil, phoneCF = nil, spawnT = 0,
+	zoomT = 1, zoomS = 1, zoomVel = 0, wide = false, autoT = 0, autoTarget = 1, autoS = 1, punch = 0, stageS = 1,
+	lookS = nil, camS = nil, btsT = 0, rec = false, recT = 0, recDur = 15, recIds = {}, recNext = 0,
+	timer = 0, timerT = 0, emotesOpen = false, els = nil, light = 2, temp = "NEUTRAL", fovS = 62, filterIdx = 1,
+	walkDone = false, walkConn = nil, hintShown = false, lastClip = nil, shell = nil,
+}
+local TIK_EMOTES = { { "wave", "👋" }, { "point", "👉" }, { "dance", "💃" }, { "dance2", "🕺" }, { "dance3", "✨" }, { "cheer", "🙌" }, { "laugh", "😂" } }
+local TIK_TEMPS = { "WARM", "NEUTRAL", "COOL" }
+local TIK_FILTERS = { { "PORTRAIT", "natural" }, { "DREAM", "dream" }, { "Y2K", "y2k" }, { "KODAK", "film" }, { "NOIR", "noir" } }
+
+-- Full screen phone shell (dark mask around a portrait phone with a viewfinder cut-out).
+local function buildPhoneShell(prefix, order, vfAspect, topFrac)
+	local shell = { els = {} }
+	shell.maskGui = new("ScreenGui", { Name = prefix .. "Mask", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = order, Enabled = false, Parent = playerGui })
+	shell.chromeGui = new("ScreenGui", { Name = prefix .. "Chrome", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = order + 10, Enabled = false, Parent = playerGui })
+	local e = shell.els
+	local dark = Color3.fromRGB(5, 5, 8)
+	local function mask(name) return new("Frame", { Name = name, BackgroundColor3 = dark, BorderSizePixel = 0, ZIndex = 1, Parent = shell.maskGui }) end
+	e.maskL, e.maskR, e.maskT, e.maskB = mask("L"), mask("R"), mask("T"), mask("B")
+	for _, m in ipairs({ e.maskL, e.maskR }) do UI.gradient(m, ColorSequence.new(Color3.fromRGB(10, 9, 16), dark), 90) end
+	e.bezel = new("Frame", { Name = "Bezel", BackgroundTransparency = 1, ZIndex = 3, Parent = shell.maskGui })
+	UI.corner(e.bezel, 46)
+	UI.gradient(UI.stroke(e.bezel, 4, T.white, 0.05), T.chrome, 90)
+	e.phoneFrame = new("Frame", { Name = "Phone", BackgroundTransparency = 1, ClipsDescendants = true, ZIndex = 10, Parent = shell.chromeGui })
+	UI.corner(e.phoneFrame, 46)
+	e.vfFrame = new("Frame", { Name = "Viewfinder", BackgroundTransparency = 1, ZIndex = 11, Parent = shell.chromeGui })
+	function shell.layout()
+		local vp = camera.ViewportSize
+		local phoneH = vp.Y * 0.965
+		local phoneW = phoneH * (9 / 19.5)
+		if phoneW > vp.X * 0.92 then
+			phoneW = vp.X * 0.92
+			phoneH = phoneW * (19.5 / 9)
+		end
+		local x0 = (vp.X - phoneW) / 2
+		local y0 = (vp.Y - phoneH) / 2
+		local vfW = phoneW
+		local vfH = math.min(phoneW * vfAspect, phoneH * 0.86)
+		local vfY = y0 + phoneH * topFrac
+		shell.region = { x0 = x0, y0 = y0, w = phoneW, h = phoneH, vfX = x0, vfY = vfY, vfW = vfW, vfH = vfH, vp = vp }
+		e.maskL.Size = UDim2.new(0, x0, 1, 0)
+		e.maskR.Size = UDim2.new(0, vp.X - (x0 + phoneW), 1, 0)
+		e.maskR.Position = UDim2.new(0, x0 + phoneW, 0, 0)
+		e.maskT.Size = UDim2.new(0, phoneW, 0, vfY)
+		e.maskT.Position = UDim2.new(0, x0, 0, 0)
+		e.maskB.Size = UDim2.new(0, phoneW, 0, vp.Y - (vfY + vfH))
+		e.maskB.Position = UDim2.new(0, x0, 0, vfY + vfH)
+		e.bezel.Size = UDim2.new(0, phoneW, 0, phoneH)
+		e.bezel.Position = UDim2.new(0, x0, 0, y0)
+		e.phoneFrame.Size = UDim2.new(0, phoneW, 0, phoneH)
+		e.phoneFrame.Position = UDim2.new(0, x0, 0, y0)
+		e.vfFrame.Size = UDim2.new(0, vfW, 0, vfH)
+		e.vfFrame.Position = UDim2.new(0, x0, 0, vfY)
+		if shell.onLayout then shell.onLayout(shell.region) end
+	end
+	function shell.setEnabled(v)
+		shell.maskGui.Enabled = v
+		shell.chromeGui.Enabled = v
+	end
+	shell.layout()
+	return shell
+end
+
+function Tik.buildUI()
+	local shell = buildPhoneShell("ICS2K_Tik", 250, 16 / 9, 0.06)
+	Tik.shell = shell
+	local e = shell.els
+	Tik.els = e
+	local pf, vf = e.phoneFrame, e.vfFrame
+	local glass = Color3.fromRGB(20, 20, 26)
+	local tikRed = Color3.fromRGB(254, 44, 85)
+	local function roundBtn(parent, glyph, pos, size, onClick, name)
+		local b = new("TextButton", { Name = name or "Btn", Size = UDim2.new(0, size, 0, size), Position = pos, BackgroundColor3 = glass, BackgroundTransparency = 0.35, Text = "", AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 13, Parent = parent })
+		UI.pill(b)
+		UI.stroke(b, 1, T.white, 0.75)
+		local l = UI.text(b, glyph, { font = T.font.ui, size = math.floor(size * 0.42), color = T.white, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 1, 0), z = 14 })
+		b.MouseButton1Click:Connect(function() Sound.play("click", 0.2) onClick() end)
+		return { btn = b, label = l }
+	end
+	e.hints = UI.text(shell.chromeGui, "ENTER  record   SPACE  jump   .  emote menu\nW S  walk   A D  turn   wheel / − +  zoom\nL  light   T  colour   V  wide   Z  auto zoom\nN  center stage   F  filter   X  pack up", {
+		font = T.font.mono, size = 13, color = T.muted, frameSize = UDim2.new(0, 310, 0, 100), pos = UDim2.new(0, 18, 1, -110), yalign = Enum.TextYAlignment.Bottom, z = 5,
+	})
+	e.brand = UI.text(shell.chromeGui, "ICS2K ✦ TIKTOK STUDIO", { font = T.font.head, size = 10, color = T.lavender, frameSize = UDim2.new(0, 240, 0, 20), pos = UDim2.new(1, -18, 1, -40), anchor = Vector2.new(1, 0), xalign = Enum.TextXAlignment.Right, z = 5 })
+	-- status bar + island
+	e.status = UI.text(pf, "", { font = T.font.ui, size = 14, color = T.white, frameSize = UDim2.new(0.3, 0, 0, 24), pos = UDim2.new(0.07, 0, 0, 10), z = 12 })
+	UI.text(pf, "▮▮▮  5G  ▭", { font = T.font.ui, size = 12, color = T.white, frameSize = UDim2.new(0.32, 0, 0, 24), pos = UDim2.new(0.61, 0, 0, 10), xalign = Enum.TextXAlignment.Right, z = 12 })
+	local island = new("Frame", { Size = UDim2.new(0.3, 0, 0, 24), Position = UDim2.new(0.35, 0, 0, 12), BackgroundColor3 = T.black, BorderSizePixel = 0, ZIndex = 12, Parent = pf })
+	UI.pill(island)
+	UI.stroke(island, 1, Color3.fromRGB(40, 40, 48), 0)
+	-- viewfinder top: progress, close, sound pill, rec label
+	e.progress = new("Frame", { Size = UDim2.new(0, 0, 0, 4), BackgroundColor3 = tikRed, BorderSizePixel = 0, Visible = false, ZIndex = 14, Parent = vf })
+	e.closeBtn = roundBtn(vf, "✕", UDim2.new(0, 10, 0, 14), 36, function() setMode("STANDARD") end, "CloseBtn")
+	e.sound = new("Frame", { Size = UDim2.new(0, 190, 0, 30), Position = UDim2.new(0.5, -95, 0, 17), BackgroundColor3 = glass, BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 13, Parent = vf })
+	UI.pill(e.sound)
+	UI.text(e.sound, "♪  ICS2K · original sound", { font = T.font.ui, size = 12, color = T.white, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 1, 0), z = 14 })
+	e.recLbl = UI.text(vf, "", { font = T.font.mono, size = 15, color = tikRed, frameSize = UDim2.new(0, 160, 0, 20), pos = UDim2.new(0, 14, 0, 58), stroke = 1, z = 14 })
+	-- right column: smart features
+	local col = {
+		{ "💡", "LIGHT", function() Tik.cycleLight() end },
+		{ "☀", "TEMP", function() Tik.cycleTemp() end },
+		{ ".5", "WIDE", function() Tik.toggleWide() end },
+		{ "↕", "AUTO", function() Tik.toggleAuto() end },
+		{ "◎", "STAGE", function() Tik.toggleStage() end },
+		{ "✦", "FILTER", function() Tik.cycleFilter() end },
+		{ "◴", "TIMER", function() Tik.cycleTimer() end },
+	}
+	e.colBtns = {}
+	for i, c in ipairs(col) do
+		local y = 64 + (i - 1) * 56
+		local b = roundBtn(vf, c[1], UDim2.new(1, -52, 0, y), 40, c[3], c[2] .. "Btn")
+		UI.text(vf, c[2], { font = T.font.head, size = 7, color = T.white, frameSize = UDim2.new(0, 60, 0, 12), pos = UDim2.new(1, -62, 0, y + 41), xalign = Enum.TextXAlignment.Center, stroke = 1, z = 13 })
+		e.colBtns[c[2]] = b
+	end
+	e.lightDots = UI.text(vf, "", { font = T.font.mono, size = 9, color = T.gold, frameSize = UDim2.new(0, 60, 0, 12), pos = UDim2.new(1, -62, 0, 64 + 51), xalign = Enum.TextXAlignment.Center, z = 14 })
+	-- zoom row + duration chips at the bottom of the viewfinder
+	e.zoomRow = new("Frame", { Size = UDim2.new(0, 260, 0, 32), Position = UDim2.new(0.5, -130, 1, -92), BackgroundTransparency = 1, ZIndex = 12, Parent = vf })
+	UI.list(e.zoomRow, 6, true, Enum.HorizontalAlignment.Center)
+	e.zoomChips = {}
+	local function chip(text, order, onClick, name)
+		local c = new("TextButton", { Name = name or "Chip", Size = UDim2.new(0, 42, 0, 26), BackgroundColor3 = T.black, BackgroundTransparency = 0.45, Text = "", AutoButtonColor = false, BorderSizePixel = 0, LayoutOrder = order, ZIndex = 13, Parent = e.zoomRow })
+		UI.pill(c)
+		local l = UI.text(c, text, { font = T.font.uiBold, size = 12, color = T.white, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 1, 0), z = 14 })
+		c.MouseButton1Click:Connect(function() Sound.play("click", 0.15) onClick() end)
+		return { chip = c, label = l }
+	end
+	e.zoomOut = chip("−", 1, function() Tik.zoomBy(-1) end, "ZoomOutBtn")
+	for i, z in ipairs({ 0.5, 1, 2 }) do
+		local c = chip(z < 1 and ".5x" or (z .. "x"), 1 + i, function() Tik.zoomT = z end)
+		c.z = z
+		table.insert(e.zoomChips, c)
+	end
+	e.zoomIn = chip("+", 5, function() Tik.zoomBy(1) end, "ZoomInBtn")
+	e.durRow = new("Frame", { Size = UDim2.new(0, 200, 0, 22), Position = UDim2.new(0.5, -100, 1, -52), BackgroundTransparency = 1, ZIndex = 12, Parent = vf })
+	UI.list(e.durRow, 10, true, Enum.HorizontalAlignment.Center)
+	e.durBtns = {}
+	for i, d in ipairs({ { 15, "15s" }, { 60, "60s" }, { 180, "3m" } }) do
+		local b = new("TextButton", { Size = UDim2.new(0, 44, 0, 22), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, LayoutOrder = i, ZIndex = 13, Parent = e.durRow })
+		local l = UI.text(b, d[2], { font = T.font.uiBold, size = 13, color = T.white, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 1, 0), stroke = 1, z = 14 })
+		b.MouseButton1Click:Connect(function() Tik.recDur = d[1] Tik.refreshUI() end)
+		e.durBtns[d[1]] = l
+	end
+	-- bottom band: emotes, record, gallery
+	e.emoteBtn = roundBtn(pf, "😀", UDim2.new(0.12, 0, 0.885, 0), 48, function() Tik.toggleEmotes() end, "EmoteBtn")
+	UI.text(pf, "Emotes", { font = T.font.ui, size = 10, color = T.white, frameSize = UDim2.new(0, 60, 0, 14), pos = UDim2.new(0.12, -6, 0.885, 50), xalign = Enum.TextXAlignment.Center, z = 12 })
+	e.recRing = new("Frame", { Size = UDim2.new(0, 82, 0, 82), Position = UDim2.new(0.5, -41, 0.873, 0), BackgroundTransparency = 1, ZIndex = 12, Parent = pf })
+	UI.pill(e.recRing)
+	UI.stroke(e.recRing, 4, T.white, 0.15)
+	e.recBtn = new("TextButton", { Name = "RecBtn", Size = UDim2.new(0, 64, 0, 64), Position = UDim2.new(0.5, -32, 0.5, -32), BackgroundColor3 = tikRed, Text = "", AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 13, Parent = e.recRing })
+	e.recCorner = UI.pill(e.recBtn)
+	e.recBtn.MouseButton1Click:Connect(function() Tik.toggleRec() end)
+	e.thumb = new("ImageButton", { Name = "Thumb", Size = UDim2.new(0, 48, 0, 48), Position = UDim2.new(0.88, -48, 0.885, 0), BackgroundColor3 = Color3.fromRGB(30, 30, 36), BorderSizePixel = 0, ScaleType = Enum.ScaleType.Crop, ZIndex = 12, Parent = pf })
+	UI.corner(e.thumb, 10)
+	UI.stroke(e.thumb, 1, T.white, 0.5)
+	e.thumb.MouseButton1Click:Connect(function() Window.open("GALLERY") end)
+	UI.text(pf, "Upload", { font = T.font.ui, size = 10, color = T.white, frameSize = UDim2.new(0, 60, 0, 14), pos = UDim2.new(0.88, -54, 0.885, 50), xalign = Enum.TextXAlignment.Center, z = 12 })
+	-- emote strip
+	e.emoteStrip = new("Frame", { Size = UDim2.new(1, -20, 0, 48), Position = UDim2.new(0, 10, 1, -148), BackgroundColor3 = glass, BackgroundTransparency = 0.3, BorderSizePixel = 0, Visible = false, ZIndex = 15, Parent = vf })
+	UI.pill(e.emoteStrip)
+	UI.list(e.emoteStrip, 4, true, Enum.HorizontalAlignment.Center)
+	for i, em in ipairs(TIK_EMOTES) do
+		local b = new("TextButton", { Name = "Emote_" .. em[1], Size = UDim2.new(0, 42, 0, 40), BackgroundColor3 = T.black, BackgroundTransparency = 0.5, Text = "", AutoButtonColor = false, BorderSizePixel = 0, LayoutOrder = i, ZIndex = 16, Parent = e.emoteStrip })
+		UI.pill(b)
+		UI.text(b, em[2], { font = T.font.ui, size = 18, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 0, 26), z = 17 })
+		UI.text(b, em[1], { font = T.font.ui, size = 8, color = T.white, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 0, 10), pos = UDim2.new(0, 0, 0, 27), z = 17 })
+		b.MouseButton1Click:Connect(function() Tik.emote(em[1]) end)
+	end
+	-- countdown, splash, blink, passive tap
+	e.countdown = UI.text(vf, "", { font = T.font.big, size = 120, color = T.white, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 1, 0), stroke = 2, z = 18 })
+	e.splash = new("Frame", { Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = T.black, BorderSizePixel = 0, Visible = false, ZIndex = 25, Parent = pf })
+	UI.text(e.splash, "♪", { font = T.font.big, size = 90, color = T.white, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 0, 120), pos = UDim2.new(0, 0, 0.36, 0), z = 26 })
+	UI.text(e.splash, "ICS2K  LIVE  STUDIO", { font = T.font.head, size = 12, color = T.lavender, xalign = Enum.TextXAlignment.Center, frameSize = UDim2.new(1, 0, 0, 20), pos = UDim2.new(0, 0, 0.56, 0), z = 26 })
+	e.blink = new("Frame", { Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = T.black, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 15, Parent = vf })
+	e.tap = new("TextButton", { Name = "PassiveTap", Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "", ZIndex = 11, Parent = vf })
+	shell.onLayout = function(r)
+		e.hints.Visible = r.x0 > 200
+		e.brand.Visible = r.x0 > 160
+	end
+	shell.onLayout(shell.region)
+	Tik.refreshUI()
+end
+
+function Tik.setRigAttr(key, value)
+	if Tik.rigLocal then
+		if Tik.rig then Tik.rig:SetAttribute(key, value) end
+	else
+		Net.sendRig("attr", { key = key, value = value })
+	end
+end
+
+function Tik.cycleLight()
+	Tik.light = (Tik.light + 1) % 5
+	S.tiktok.light = Tik.light
+	Tik.setRigAttr("Light", Tik.light)
+	Tik.refreshUI()
+	Toast.show("ring light " .. Tik.light .. " / 4", "info", 1)
+end
+
+function Tik.cycleTemp()
+	local i = 1
+	for k, v in ipairs(TIK_TEMPS) do if v == Tik.temp then i = k end end
+	Tik.temp = TIK_TEMPS[(i % #TIK_TEMPS) + 1]
+	S.tiktok.temp = Tik.temp
+	Tik.setRigAttr("Temp", Tik.temp)
+	Tik.refreshUI()
+end
+
+function Tik.toggleWide() Tik.wide = not Tik.wide Tik.refreshUI() end
+function Tik.toggleAuto()
+	S.tiktok.autoZoom = not S.tiktok.autoZoom
+	Tik.refreshUI()
+	Toast.show(S.tiktok.autoZoom and "auto zoom on" or "auto zoom off", "info", 1)
+end
+function Tik.toggleStage()
+	S.tiktok.centerStage = not S.tiktok.centerStage
+	Tik.refreshUI()
+	Toast.show(S.tiktok.centerStage and "center stage on" or "center stage off", "info", 1)
+end
+function Tik.cycleFilter()
+	Tik.filterIdx = (Tik.filterIdx % #TIK_FILTERS) + 1
+	local f = TIK_FILTERS[Tik.filterIdx]
+	S.tiktok.preset = f[1]
+	if S.filter.lock then Toast.show("filter is locked in the window", "error", 1.5) return end
+	Filter.requestPreset(f[1])
+	Toast.show("filter ✦ " .. f[2], "info", 1)
+end
+function Tik.cycleTimer()
+	Tik.timer = ({ [0] = 3, [3] = 10, [10] = 0 })[Tik.timer] or 0
+	Tik.refreshUI()
+end
+function Tik.zoomBy(dir) Tik.zoomT = clamp(Tik.zoomT * math.pow(2, dir * 0.25), 0.5, 4) end
+function Tik.toggleEmotes()
+	Tik.emotesOpen = not Tik.emotesOpen
+	if Tik.els then Tik.els.emoteStrip.Visible = Tik.emotesOpen end
+end
+function Tik.emote(name)
+	local ok, played = pcall(function() return Rig.humanoid:PlayEmote(name) end)
+	if not (ok and played) then Toast.show("emote '" .. name .. "' is not available here · try the . menu", "error", 2) end
+end
+
+function Tik.toggleRec()
+	if Tik.phase ~= "live" then return end
+	if Tik.rec then Tik.stopRec(false) return end
+	if Tik.timerT > 0 then Tik.timerT = 0 if Tik.els then Tik.els.countdown.Text = "" end return end
+	if Tik.timer > 0 then Tik.timerT = Tik.timer return end
+	Tik.startRec()
+end
+
+function Tik.startRec()
+	Tik.rec = true
+	Tik.recT = 0
+	Tik.recIds = {}
+	Tik.recNext = 0.2
+	Tik.setRigAttr("Rec", true)
+	Sound.play("ping", 0.3)
+	Tik.refreshUI()
+end
+
+function Tik.stopRec(auto)
+	if not Tik.rec then return end
+	Tik.rec = false
+	Tik.setRigAttr("Rec", false)
+	local ids = Tik.recIds
+	Tik.recIds = {}
+	if #ids >= 1 then
+		local item = Gallery.addClip(ids, "TIKTOK")
+		Tik.lastClip = item
+		Toast.show(string.format("clip saved · %d frames · gallery → SAVE TO DEVICE", #ids), "ok", 3)
+		if not Tik.hintShown then
+			Tik.hintShown = true
+			Toast.show("for a real video file use the Roblox menu: Esc → Record Video (Windows)", "info", 5)
+		end
+	else
+		Toast.show(auto and "clip ended" or "recording stopped", "info", 1.5)
+	end
+	Tik.refreshUI()
+end
+
+function Tik.refreshUI()
+	local e = Tik.els
+	if not e then return end
+	e.lightDots.Text = string.rep("●", Tik.light) .. string.rep("○", 4 - Tik.light)
+	e.colBtns.TEMP.label.Text = ({ WARM = "3200K", NEUTRAL = "4500K", COOL = "5600K" })[Tik.temp] or "☀"
+	e.colBtns.TEMP.label.TextSize = 10
+	e.colBtns.WIDE.label.TextColor3 = Tik.wide and T.gold or T.white
+	e.colBtns.AUTO.label.TextColor3 = S.tiktok.autoZoom and T.gold or T.white
+	e.colBtns.STAGE.label.TextColor3 = S.tiktok.centerStage and T.gold or T.white
+	e.colBtns.TIMER.label.Text = Tik.timer > 0 and (Tik.timer .. "s") or "◴"
+	e.colBtns.TIMER.label.TextSize = Tik.timer > 0 and 12 or 17
+	for d, l in pairs(e.durBtns) do l.TextColor3 = (d == Tik.recDur) and T.gold or T.white end
+	if Tik.rec then
+		e.recBtn.Size = UDim2.new(0, 36, 0, 36)
+		e.recBtn.Position = UDim2.new(0.5, -18, 0.5, -18)
+		e.recCorner.CornerRadius = UDim.new(0, 8)
+	else
+		e.recBtn.Size = UDim2.new(0, 64, 0, 64)
+		e.recBtn.Position = UDim2.new(0.5, -32, 0.5, -32)
+		e.recCorner.CornerRadius = UDim.new(1, 0)
+	end
+	e.progress.Visible = Tik.rec
+	local latest = Tik.lastClip or Gallery.items[1]
+	e.thumb.Image = latest and latest.id or ""
+end
+
+-- Where the tripod and the mark go: in front of you, never through a wall, on the floor.
+function Tik.placeRig()
+	local rootPos = Rig.root.Position
+	local F = Util.safeUnit(Util.flatten(Rig.root.CFrame.LookVector))
+	local dist = clamp(S.tiktok.markDistance, 5, 12)
+	local hit = Ray.cast(rootPos + Vector3.new(0, 1, 0), F * (dist + 1))
+	if hit then dist = math.max(4.5, (hit.Position - rootPos).Magnitude - 1.5) end
+	local tripodPos = rootPos + F * dist
+	local floorY = Ray.groundY(tripodPos + Vector3.new(0, 2, 0), 14) or (rootPos.Y - 3)
+	tripodPos = Vector3.new(tripodPos.X, floorY, tripodPos.Z)
+	local markPos = rootPos + F * math.max(1.2, dist - 3.6)
+	local markY = Ray.groundY(markPos + Vector3.new(0, 2, 0), 14) or floorY
+	Tik.rigCF = CFrame.lookAt(tripodPos, Vector3.new(markPos.X, floorY, markPos.Z))
+	Tik.mark = Vector3.new(markPos.X, markY, markPos.Z)
+	Tik.phoneCF = Tik.rigCF * Tripod.phoneOffset
+end
+
+-- Behind-the-scenes shot while the rig assembles and you walk to the mark.
+function Tik.btsCamera(dt, dollyIn)
+	Tik.btsT = Tik.btsT + dt
+	local phonePos = Tik.phoneCF.Position
+	local side = Tik.rigCF:PointToWorldSpace(Vector3.new(4.6 + math.sin(Tik.btsT * 0.35) * 0.6, 3.1, -1.4))
+	local closeUp = Tik.phoneCF:PointToWorldSpace(Vector3.new(1.2, 0.3, -2.2))
+	local pos = side:Lerp(closeUp, dollyIn)
+	local look = (phonePos + Tik.mark + Vector3.new(0, 2.2, 0)) / 2
+	look = look:Lerp(phonePos, dollyIn * 0.6)
+	pos = Ray.pullIn(pos, look, 0.6)
+	local target = CFrame.lookAt(pos, look)
+	Tik.camS = Tik.camS and Tik.camS:Lerp(target, Util.expAlpha(6, dt)) or target
+	Cam.cf = Tik.camS
+	Cam.fov = Util.lerp(58, 46, dollyIn)
+	Filter.setFocus((look - pos).Magnitude)
+end
+
+local function tikLocalRig()
+	Tik.rigLocal = true
+	Tik.rig = Tripod.buildModel(Tik.rigCF, localFolder(), player.UserId)
+	Tik.rig:SetAttribute("Light", Tik.light)
+	Tik.rig:SetAttribute("Temp", Tik.temp)
+	Spectate.onRig(Tik.rig)
+end
+
+defineMode({
+	id = "TIKTOK", name = "TIKTOK STUDIO", icon = "🎵", blurb = "ring light tripod · auto walk to the mark · phone POV · emotes · clips",
+	scriptable = true, preset = function() return S.tiktok.preset end, wantsMouseLock = "never",
+	keys = {
+		{ "Enter / ●", "start or stop recording a clip" }, { "W / S", "walk" }, { "A / D", "turn" }, { "Space", "jump" },
+		{ ".", "roblox emote menu" }, { "Wheel / − +", "zoom" }, { "L", "ring light level" }, { "T", "light colour" },
+		{ "V", "wide angle" }, { "Z", "auto zoom pulses" }, { "N", "center stage" }, { "F", "filter" }, { "X", "pack up" },
+	},
+	enter = function()
+		if not Tik.els then Tik.buildUI() end
+		Tik.shell.layout()
+		Tik.placeRig()
+		Tik.light = clamp(math.floor(S.tiktok.light + 0.5), 0, 4)
+		Tik.temp = S.tiktok.temp
+		if not Tripod.temps[Tik.temp] then Tik.temp = "NEUTRAL" end
+		Tik.zoomT, Tik.zoomS, Tik.zoomVel = 1, 1, 0
+		Tik.wide, Tik.autoS, Tik.autoTarget, Tik.autoT, Tik.punch, Tik.stageS = false, 1, 1, 2, 0, 1
+		Tik.lookS, Tik.camS, Tik.btsT = nil, nil, 0
+		Tik.rec, Tik.recIds, Tik.timerT, Tik.emotesOpen, Tik.walkDone = false, {}, 0, false, false
+		Tik.fovS = S.tiktok.fov
+		Tik.phase, Tik.phaseT, Tik.spawnT = "spawn", 0, os.clock()
+		Tik.rig = nil
+		Tik.rigLocal = false
+		if Net.available then
+			Net.sendRig("spawn", { cf = Tik.rigCF, light = Tik.light, temp = Tik.temp })
+		else
+			tikLocalRig()
+		end
+		Body.setControls(false)
+		Body.setAutoRotate(true)
+		Body.setWalk(nil)
+		Tik.shell.setEnabled(false)
+		Tik.els.emoteStrip.Visible = false
+		Tik.els.splash.Visible = false
+		Tik.els.countdown.Text = ""
+		Tik.refreshUI()
+		Toast.show(Net.available and "setting up the ring light · everyone can see this" or "setting up the ring light (install ICS2K_Server.lua so others see it)", "info", 3)
+	end,
+	exit = function()
+		if Tik.rec then Tik.stopRec(true) end
+		if Tik.walkConn then Tik.walkConn:Disconnect() Tik.walkConn = nil end
+		if Tik.shell then Tik.shell.setEnabled(false) end
+		local rig = Tik.rig
+		Tik.rig = nil
+		Tik.phase = "off"
+		if Tik.rigLocal then
+			if rig then Tripod.animateOut(rig, function() Spectate.offRig(rig) rig:Destroy() end) end
+		else
+			Net.sendRig("despawn")
+		end
+		pcall(function() Rig.humanoid:Move(Vector3.new(), false) end)
+	end,
+	update = function(dt, t)
+		local e = Tik.els
+		Tik.phaseT = Tik.phaseT + dt
+		-- a replicated rig arrives a moment after we asked for it; fall back to a local one if the server is silent
+		if not Tik.rig and not Tik.rigLocal then
+			local m = Spectate.findOwnRig()
+			if m then
+				Tik.rig = m
+				local ph = m:FindFirstChild("Phone")
+				if ph then Tik.phoneCF = ph.CFrame end
+			elseif os.clock() - Tik.spawnT > 2 then
+				tikLocalRig()
+				Toast.show("no reply from ICS2K_Server · using a local rig", "error", 2.5)
+			end
+		end
+		local phoneCF = Tik.phoneCF
+		local head = Rig.head and Rig.head.Position or (Rig.root.Position + Vector3.new(0, 1.5, 0))
+		local phase = Tik.phase
+		if phase == "spawn" then
+			Tik.btsCamera(dt, 0)
+			if Tik.phaseT > 0.9 and Tik.rig then
+				Tik.phase, Tik.phaseT = "walk", 0
+				Tik.walkDone = false
+				pcall(function()
+					Tik.walkConn = Rig.humanoid.MoveToFinished:Connect(function() Tik.walkDone = true end)
+					Rig.humanoid:MoveTo(Tik.mark)
+				end)
+			end
+			return
+		elseif phase == "walk" then
+			Tik.btsCamera(dt, 0)
+			local flat = Util.flatten(Rig.root.Position - Tik.mark)
+			if Tik.walkDone or flat.Magnitude < 1.2 or Tik.phaseT > 6 then
+				if Tik.walkConn then Tik.walkConn:Disconnect() Tik.walkConn = nil end
+				Tik.phase, Tik.phaseT = "hold", 0
+				local r = Rig.root
+				r.CFrame = CFrame.lookAt(r.Position, Vector3.new(phoneCF.Position.X, r.Position.Y, phoneCF.Position.Z))
+			end
+			return
+		elseif phase == "hold" then
+			Tik.btsCamera(dt, Util.smoothstep(Tik.phaseT / 1.6))
+			if Tik.phaseT > 1.6 then
+				Tik.phase, Tik.phaseT = "flyin", 0
+				Tik.introFrom, Tik.introFromFov = Cam.cf, Cam.fov
+			end
+			return
+		elseif phase == "flyin" then
+			local screenCF = phoneCF * CFrame.new(0, 0, -0.95)
+			local target = CFrame.lookAt(screenCF.Position, phoneCF.Position)
+			local a = Util.easeInOutCubic(Tik.phaseT / 0.65)
+			Cam.cf = Tik.introFrom:Lerp(target, a)
+			Cam.fov = Util.lerp(Tik.introFromFov, 34, a)
+			Filter.setFocus(1)
+			if Tik.phaseT >= 0.5 and not Tik.shell.maskGui.Enabled then
+				Tik.shell.setEnabled(true)
+				e.splash.Visible = true
+				e.splash.BackgroundTransparency = 0
+			end
+			if Tik.phaseT >= 0.65 then
+				Tik.phase, Tik.phaseT, Tik.camS = "live", 0, nil
+				tween(e.splash, { BackgroundTransparency = 1 }, 0.35)
+				task.delay(0.4, function() e.splash.Visible = false end)
+				Sound.play("swoosh", 0.3)
+			end
+			return
+		end
+		if phase ~= "live" then return end
+
+		-- the phone's front camera, fixed on the tripod
+		Tik.zoomS, Tik.zoomVel = Util.spring(Tik.zoomS, Tik.zoomVel, Tik.zoomT, 120, 22, dt)
+		if S.tiktok.autoZoom then
+			Tik.autoT = Tik.autoT - dt
+			if Tik.autoT <= 0 then
+				Tik.autoT = rng:NextNumber(3, 7)
+				if rng:NextNumber() < 0.25 then
+					Tik.punch = 1
+					Tik.autoTarget = 1
+				else
+					Tik.autoTarget = ({ 1, 1, 1.12, 1.22, 1.35 })[rng:NextInteger(1, 5)]
+				end
+			end
+		else
+			Tik.autoTarget, Tik.punch = 1, 0
+		end
+		Tik.punch = math.max(0, Tik.punch - dt / 1.1)
+		local strength = clamp(S.tiktok.autoZoomStrength, 0, 2)
+		local autoGoal = 1 + (Tik.autoTarget - 1) * strength + Tik.punch * 0.28 * strength
+		Tik.autoS = Util.smooth(Tik.autoS, autoGoal, Tik.punch > 0 and 14 or 1.4, dt)
+		-- center stage: digital pan + crop inside the wide field so you stay framed
+		local lens = phoneCF:PointToWorldSpace(Vector3.new(0, 0.66, -0.06))
+		local forward = phoneCF.LookVector
+		local markHead = Tik.mark + Vector3.new(0, 2.4, 0)
+		local look, stageZoom = markHead, 1
+		if S.tiktok.centerStage then
+			local toHead = head - lens
+			local dist = math.max(0.5, toHead.Magnitude)
+			local ang = math.acos(clamp(forward:Dot(toHead / dist), -1, 1))
+			local maxAng = rad(26)
+			if ang > maxAng then
+				local k = maxAng / ang
+				look = lens + toHead * k + (markHead - lens) * (1 - k)
+			else
+				look = head
+			end
+			stageZoom = clamp(3.8 / dist, 0.85, 1.4)
+		end
+		Tik.lookS = Tik.lookS and Util.smoothVec(Tik.lookS, look, 5, dt) or look
+		Tik.stageS = Util.smooth(Tik.stageS, stageZoom, 2.5, dt)
+		local target = CFrame.lookAt(lens, Tik.lookS)
+		Tik.camS = Tik.camS and Tik.camS:Lerp(target, Util.expAlpha(18, dt)) or target
+		Cam.cf = Tik.camS
+		local fov = S.tiktok.fov / Tik.zoomS / Tik.autoS / Tik.stageS * (Tik.wide and 1.55 or 1)
+		Tik.fovS = Util.smooth(Tik.fovS, clamp(fov, 18, 112), 10, dt)
+		Cam.fov = Tik.fovS
+		Filter.setFocus((head - lens).Magnitude)
+
+		-- body-relative movement so you can dance around the mark
+		local keys = STATE.keys
+		local hum = Rig.humanoid
+		local fwd = (keys.W and 1 or 0) - (keys.S and 1 or 0)
+		local side = (keys.D and 1 or 0) - (keys.A and 1 or 0)
+		local lookF = Util.safeUnit(Util.flatten(Rig.root.CFrame.LookVector))
+		local right = Vector3.new(-lookF.Z, 0, lookF.X)
+		local move = lookF * fwd + right * side
+		pcall(function() hum:Move(move.Magnitude > 0 and move.Unit or Vector3.new(), false) end)
+		if keys.Space and hum.FloorMaterial ~= Enum.Material.Air then hum.Jump = true end
+
+		-- countdown
+		if Tik.timerT > 0 then
+			Tik.timerT = Tik.timerT - dt
+			e.countdown.Text = tostring(math.ceil(Tik.timerT))
+			if Tik.timerT <= 0 then
+				e.countdown.Text = ""
+				Tik.startRec()
+			end
+		end
+		-- recording: progress bar + burst frames into a clip
+		if Tik.rec then
+			Tik.recT = Tik.recT + dt
+			e.progress.Size = UDim2.new(clamp(Tik.recT / Tik.recDur, 0, 1), 0, 0, 4)
+			e.recLbl.Text = "● " .. Util.fmtTime(Tik.recT)
+			Tik.recNext = Tik.recNext - dt
+			if Tik.recNext <= 0 and not Gallery.busy then
+				local frames = clamp(math.floor(S.tiktok.clipFrames + 0.5), 4, 40)
+				Tik.recNext = Tik.recDur / frames
+				Gallery.capture({
+					raw = true, hide = { Tik.shell.chromeGui, HUD.gui, Window.gui, Toast.gui },
+					onDone = function(id) if id and Tik.rec then table.insert(Tik.recIds, id) end end,
+				})
+			end
+			if Tik.recT >= Tik.recDur then Tik.stopRec(true) end
+		else
+			e.recLbl.Text = ""
+		end
+		Filter.flashbulbs(dt, head)
+	end,
+	wheel = function(delta)
+		if Tik.phase ~= "live" then return end
+		Tik.zoomT = clamp(Tik.zoomT * math.pow(2, delta * 0.18), 0.5, 4)
+	end,
+	key = function(code, began)
+		if not began or Tik.phase ~= "live" then return end
+		if code == Enum.KeyCode.Return or code == Enum.KeyCode.KeypadEnter then Tik.toggleRec()
+		elseif code == Enum.KeyCode.L then Tik.cycleLight()
+		elseif code == Enum.KeyCode.T then Tik.cycleTemp()
+		elseif code == Enum.KeyCode.V then Tik.toggleWide()
+		elseif code == Enum.KeyCode.Z then Tik.toggleAuto()
+		elseif code == Enum.KeyCode.N then Tik.toggleStage()
+		elseif code == Enum.KeyCode.F then Tik.cycleFilter()
+		elseif code == Enum.KeyCode.G then Window.open("GALLERY")
+		end
+	end,
+	buildHud = function() return {} end,
+	tickHud = function()
+		local e = Tik.els
+		if not e or Tik.phase == "off" then return end
+		local vp = camera.ViewportSize
+		local r = Tik.shell.region
+		if r and (r.vp.X ~= vp.X or r.vp.Y ~= vp.Y) then Tik.shell.layout() end
+		e.status.Text = Util.clock24()
+		local best, bestD = 1, 1e9
+		for i, c in ipairs(e.zoomChips) do
+			local d = math.abs(math.log(c.z) - math.log(Tik.zoomT))
+			if d < bestD then best, bestD = i, d end
+		end
+		for i, c in ipairs(e.zoomChips) do
+			local active = i == best
+			c.label.TextColor3 = active and T.gold or T.white
+			c.chip.BackgroundTransparency = active and 0.1 or 0.6
+			if active then c.label.Text = string.format("%.1fx", Tik.zoomT):gsub("%.0x", "x") else c.label.Text = (c.z < 1 and ".5x" or (c.z .. "x")) end
+		end
 	end,
 })
 
@@ -3777,6 +4773,18 @@ local SETTINGS_SCHEMA = {
 		{ k = "shake", t = "slider", label = "handheld shake", min = 0, max = 2, step = 0.05, fmt = "%.2f" },
 		{ k = "preset", t = "seg", label = "look", options = { { "PORTRAIT", "PORTRAIT" }, { "OFF", "CLEAN" }, { "DREAM", "DREAM" }, { "Y2K", "Y2K" } } },
 	} },
+	{ group = "tiktok", title = "tiktok studio", items = {
+		{ k = "fov", t = "slider", label = "1x field of view", min = 40, max = 100, step = 1, fmt = "%d°" },
+		{ k = "markDistance", t = "slider", label = "tripod distance", min = 5, max = 12, step = 0.5, fmt = "%.1f" },
+		{ k = "light", t = "slider", label = "ring light level", min = 0, max = 4, step = 1, fmt = "%d" },
+		{ k = "temp", t = "seg", label = "light colour", options = { { "WARM", "3200K" }, { "NEUTRAL", "4500K" }, { "COOL", "5600K" } } },
+		{ k = "centerStage", t = "toggle", label = "center stage (auto framing)" },
+		{ k = "autoZoom", t = "toggle", label = "auto zoom pulses" },
+		{ k = "autoZoomStrength", t = "slider", label = "auto zoom strength", min = 0.2, max = 2, step = 0.05, fmt = "%.2f" },
+		{ k = "clipFrames", t = "slider", label = "frames per clip", min = 4, max = 40, step = 1, fmt = "%d" },
+		{ k = "hearts", t = "toggle", label = "hearts on the phone screen" },
+		{ k = "preset", t = "seg", label = "look", options = { { "PORTRAIT", "NATURAL" }, { "DREAM", "DREAM" }, { "Y2K", "Y2K" }, { "KODAK", "FILM" } } },
+	} },
 	{ group = "bodycam", title = "bodycam", items = {
 		{ k = "fov", t = "slider", label = "field of view", min = 60, max = 118, step = 1, fmt = "%d°" },
 		{ k = "headBob", t = "slider", label = "head bob", min = 0, max = 2, step = 0.05, fmt = "%.2f" },
@@ -4090,7 +5098,8 @@ function Window.buildGallery()
 		local cell = new("ImageButton", { Image = item.id, BackgroundColor3 = T.panel3, BorderSizePixel = 0, ScaleType = Enum.ScaleType.Crop, LayoutOrder = i, Parent = grid })
 		UI.corner(cell, 12)
 		UI.stroke(cell, 1, T.chromeE, 0.4)
-		local cap = UI.text(cell, item.label .. " " .. item.clock, { font = T.font.mono, size = 10, color = T.white, frameSize = UDim2.new(1, -8, 0, 16), pos = UDim2.new(0, 4, 1, -18), stroke = 1 })
+		local n = item.frames and #item.frames or 1
+		local cap = UI.text(cell, (n > 1 and ("CLIP " .. n .. " · ") or (item.label .. " ")) .. item.clock, { font = T.font.mono, size = 10, color = T.white, frameSize = UDim2.new(1, -8, 0, 16), pos = UDim2.new(0, 4, 1, -18), stroke = 1 })
 		cell.MouseButton1Click:Connect(function() Gallery.open(item) end)
 	end
 end
@@ -4292,7 +5301,7 @@ function Input.tick(dt, now)
 		STATE.shopUIOpen = shop
 	end
 	-- AFK
-	if S.general.afk and not STATE.afk and STATE.modeId ~= "CINEMATIC" and STATE.modeId ~= "PAPARAZZI" then
+	if S.general.afk and not STATE.afk and STATE.modeId ~= "CINEMATIC" and STATE.modeId ~= "PAPARAZZI" and STATE.modeId ~= "TIKTOK" then
 		if now - STATE.lastActivity > math.max(20, S.general.afkTimeout) then
 			STATE.afk = true
 			STATE.afkReturn = STATE.modeId
@@ -4344,7 +5353,7 @@ function Input.began(input, gp)
 		if code == Enum.KeyCode.I then Window.toggle() return end
 		if code == Enum.KeyCode.Escape then if STATE.uiHidden then setUIHidden(false) end return end
 		if code == Enum.KeyCode.LeftShift or code == Enum.KeyCode.RightShift then STATE.runway = true end
-		if (code == Enum.KeyCode.Return or code == Enum.KeyCode.KeypadEnter) and STATE.modeId ~= "PAPARAZZI" and STATE.modeId ~= "STANDARD" then
+		if (code == Enum.KeyCode.Return or code == Enum.KeyCode.KeypadEnter) and STATE.modeId ~= "PAPARAZZI" and STATE.modeId ~= "TIKTOK" and STATE.modeId ~= "STANDARD" then
 			Window.snapshot()
 			return
 		end
@@ -4436,6 +5445,7 @@ local function onRender(dt)
 		Cam.fov = camera.FieldOfView
 	end
 	Input.applyMouse()
+	Spectate.tick(dt)
 	Filter.tick(dt, t)
 	HUD.tick(dt)
 	uiClock = uiClock + dt
@@ -4447,6 +5457,7 @@ end
 
 local function onStepped(_, dt)
 	if IK.weight > 0 then pcall(IK.step) end
+	Spectate.step()
 	local m = currentMode()
 	if m.stepped then pcall(m.stepped, dt) end
 end
@@ -4473,6 +5484,8 @@ local function start()
 	Chip.init()
 	Body.rebind(char)
 	IK.bind()
+	Net.init()
+	Spectate.init()
 	Rig.humanoid.Died:Connect(function()
 		if STATE.modeId ~= "STANDARD" then setMode("STANDARD", { silent = true, noBlend = true }) end
 	end)
