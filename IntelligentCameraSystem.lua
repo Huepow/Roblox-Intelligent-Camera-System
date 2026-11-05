@@ -1787,9 +1787,17 @@ end
 
 function Gallery.share(item)
 	if not CaptureService then Toast.show("sharing needs the live Roblox client", "error") return end
-	pcall(function()
-		CaptureService:PromptShareCapture(item.id, "ICS2K", function() Toast.show("shared ✦", "ok") end, function() end)
+	-- newer clients type the first argument as Content; older ones take the id string
+	local arg = item.id
+	pcall(function() arg = Content.fromUri(item.id) end)
+	local ok = pcall(function()
+		CaptureService:PromptShareCapture(arg, "ICS2K", function() Toast.show("shared ✦", "ok") end, function() end)
 	end)
+	if not ok and arg ~= item.id then
+		pcall(function()
+			CaptureService:PromptShareCapture(item.id, "ICS2K", function() Toast.show("shared ✦", "ok") end, function() end)
+		end)
+	end
 end
 
 function Gallery.init()
@@ -3022,11 +3030,13 @@ function Pap.tapFocus()
 	local m = UserInputService:GetMouseLocation()
 	local e = Pap.els
 	if not e then return end
+	-- GetMouseLocation and ViewportPointToRay share viewport space; AbsolutePosition lives in inset space
 	local inset = GuiService:GetGuiInset()
-	local ray = camera:ViewportPointToRay(m.X, m.Y - inset.Y)
+	local ray = camera:ViewportPointToRay(m.X, m.Y)
 	local hit = Ray.cast(ray.Origin, ray.Direction * 300)
 	Filter.setFocus(hit and (hit.Position - ray.Origin).Magnitude or 60)
-	e.focusBox.Position = UDim2.new(0, m.X - e.vfFrame.AbsolutePosition.X - 37, 0, m.Y - e.vfFrame.AbsolutePosition.Y - 37)
+	local local2 = (m - inset) - e.vfFrame.AbsolutePosition
+	e.focusBox.Position = UDim2.new(0, local2.X - 37, 0, local2.Y - 37)
 	e.focusBox.Visible = true
 	Pap.focusFade = 1.2
 	local s = new("UIScale", { Scale = 1.5, Parent = e.focusBox })
@@ -4594,6 +4604,8 @@ defineMode({
 		local sc = S.cctv
 		if #CCTV.cams == 0 then return end
 		if STATE.runway then Body.setWalk("runway") elseif Body.override == "runway" then Body.setWalk(nil) end
+		-- bookmarks can be deleted from the window while we are on one of them
+		if CCTV.idx > #CCTV.cams then CCTV.switchTo(1, true) end
 		local cam = CCTV.cams[CCTV.idx]
 		local head = Rig.head and Rig.head.Position or Rig.root.Position
 		-- line of sight probe
@@ -4880,7 +4892,8 @@ function Window.init()
 	title.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			local m = UserInputService:GetMouseLocation()
-			local abs = root.AbsolutePosition
+			-- AbsolutePosition is in gui-inset space; Position inside an IgnoreGuiInset gui is viewport space
+			local abs = root.AbsolutePosition - Window.gui.AbsolutePosition
 			root.AnchorPoint = Vector2.new(0, 0)
 			root.Position = UDim2.new(0, abs.X, 0, abs.Y)
 			local offX, offY = m.X - abs.X, m.Y - abs.Y
@@ -5180,14 +5193,31 @@ end
 -- 25. MODE SWITCHING, UI HIDING, AFK
 ----------------------------------------------------------------------------
 local hiddenGuis = {}
+local savedCoreGui = {}
+local CORE_GUI_NAMES = { "PlayerList", "Health", "Backpack", "Chat", "EmotesMenu", "SelfView", "Captures" }
 
 local function setUIHidden(hidden)
 	if STATE.uiHidden == hidden then return end
 	STATE.uiHidden = hidden
-	pcall(function()
-		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, not hidden)
-		StarterGui:SetCore("TopbarEnabled", not hidden)
-	end)
+	-- remember which core guis the game had on, so un-hiding restores *that*, not "everything"
+	if hidden then
+		savedCoreGui = {}
+		for _, name in ipairs(CORE_GUI_NAMES) do
+			pcall(function()
+				local t = Enum.CoreGuiType[name]
+				savedCoreGui[name] = StarterGui:GetCoreGuiEnabled(t)
+				StarterGui:SetCoreGuiEnabled(t, false)
+			end)
+		end
+		pcall(function() StarterGui:SetCore("TopbarEnabled", false) end)
+	else
+		for _, name in ipairs(CORE_GUI_NAMES) do
+			pcall(function()
+				if savedCoreGui[name] ~= nil then StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType[name], savedCoreGui[name]) end
+			end)
+		end
+		pcall(function() StarterGui:SetCore("TopbarEnabled", true) end)
+	end
 	local keep = { ICS2K_Filter = true, ICS2K_PhoneMask = true, ICS2K_PhoneChrome = true, ICS2K_Toast = true, ICS2K_Modal = true }
 	if hidden then
 		hiddenGuis = {}
@@ -5246,6 +5276,9 @@ function setMode(id, opts)
 		camera.FieldOfView = CFG.baseFov
 		Cam.scriptable = false
 		Cam.blendT = 1
+		-- hand the mouse back exactly once; the stock camera scripts do not repair a hidden cursor
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = not STATE.uiHidden
 	end
 	local ok, err = pcall(newMode.enter, prev.id)
 	if not ok then warn("[ICS2K] enter " .. id .. ": " .. tostring(err)) end
@@ -5293,7 +5326,8 @@ function Input.tick(dt, now)
 	Input.probeClock = Input.probeClock + dt
 	if Input.probeClock > 1 / CFG.pointerProbeRate then
 		Input.probeClock = 0
-		local m = UserInputService:GetMouseLocation()
+		-- GetGuiObjectsAtPosition compares against AbsolutePosition (inset space)
+		local m = UserInputService:GetMouseLocation() - GuiService:GetGuiInset()
 		local over = false
 		local shop = false
 		local ok, objs = pcall(function() return playerGui:GetGuiObjectsAtPosition(m.X, m.Y) end)
@@ -5455,6 +5489,8 @@ local function onRender(dt)
 			camera.CFrame = Cam.cf
 			camera.FieldOfView = Cam.fov
 		end
+		-- a Scriptable camera stops maintaining Focus itself; shadows, lighting detail and audio follow it
+		camera.Focus = camera.CFrame * CFrame.new(0, 0, -clamp(Filter.focus or 12, 1, 200))
 	else
 		Cam.cf = camera.CFrame
 		Cam.fov = camera.FieldOfView
